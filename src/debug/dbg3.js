@@ -1,4 +1,4 @@
-const C = require('./cube-core.js');
+const C = require('../cube-core.js');
 const P1 = C.PHASE1_MOVES;
 // 用几何方法为少量随机状态做「≤6 步」BFS 求到 G1，再和坐标表 IDA* 的结果对照
 const geoKey = s => {

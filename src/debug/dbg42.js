@@ -1,0 +1,23 @@
+const C = require('./load-tables.js')();
+const I = C.Solver._internals;
+const SOLVED_SLICE = I.sliceOf(I.solvedPack());
+const g1 = (st) => I.twistOf(st) === 0 && I.flipOf(st) === 0 && I.sliceOf(st) === SOLVED_SLICE;
+const faces = ['U','D','L','R','F','B'], sufs = ['','2',"'"];
+const ms = []; let last = '';
+while (ms.length < 25) { const f = faces[(Math.random()*6)|0]; if (f === last) continue; last = f; ms.push(f + sufs[(Math.random()*3)|0]); }
+console.log('scramble:', ms.join(' '));
+const s = C.solvedState(); C.applyMoves(s, ms);
+const st = { perm: s.perm.slice(), ori: s.ori.map(m => I.pack(m)) };
+const p1 = C.Solver.phase1(st);
+console.log('phase1:', p1.join(' ') || '(空)');
+let cur = I.clonePack(st);
+for (const m of p1) I.applyPack(cur, m);
+console.log('阶段一结束后是否在 G1:', g1(cur), ' tw', I.twistOf(cur), 'fl', I.flipOf(cur), 'sl', I.sliceOf(cur));
+const p2 = C.Solver.phase2(cur);
+console.log('phase2:', p2.join(' '));
+let cur2 = I.clonePack(cur);
+for (const m of p2) I.applyPack(cur2, m);
+console.log('阶段二结束后是否还原:', I.twistOf(cur2) === 0 && I.flipOf(cur2) === 0 && I.cpOf(cur2) === 0 && I.epOf(cur2) === 0 && I.spOf(cur2) === 0);
+const all = p1.concat(p2);
+const chk = C.cloneState(s); C.applyMoves(chk, all);
+console.log('用几何回放整解:', C.isSolved(chk));

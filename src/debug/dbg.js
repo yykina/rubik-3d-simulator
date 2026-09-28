@@ -1,4 +1,4 @@
-const C = require('./cube-core.js');
+const C = require('../cube-core.js');
 console.log('build start');
 const t0=Date.now();
 C.Solver.build(()=>{});

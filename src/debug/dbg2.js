@@ -1,4 +1,4 @@
-const C = require('./cube-core.js');
+const C = require('../cube-core.js');
 // ---- 纯几何 IDA*（不使用任何坐标表） ----
 const P1 = C.PHASE1_MOVES;
 function geoCoords(s){

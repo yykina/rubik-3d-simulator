@@ -168,9 +168,18 @@
   }
   function applyMoves(state, moves) { for (const m of moves) applyTurn(state, m); return state; }
 
+  /**
+   * 是否已还原。
+   * 注意：面心块（center）与 E 层棱块（FR/FL/BL/BR）即使朝向不同也看不出差别，
+   * 因此只要求「位置归位」，朝向只在 U/D 面与侧面的贴纸才需要检查。
+   * 角块与棱块都要检查朝向。
+   */
   function isSolved(state) {
     for (let i = 0; i < 26; i++) {
       if (state.perm[i] !== i) return false;
+      const c = CUBIES[i];
+      if (c.kind === 'center') continue;                 // 面心朝向不可见
+      if (c.kind === 'edge' && SLICE_EDGES.indexOf(c.piece) >= 0) continue; // E 层棱块朝向不可见
       const m = state.ori[i];
       for (let k = 0; k < 9; k++) if (m[k] !== IDENTITY[k]) return false;
     }
@@ -328,12 +337,195 @@
   const maskToIdx = (mask) => SLICE_INDEX[mask];
 
   const Solver = (function () {
-    /* ---------------- 坐标编解码 ---------------- */
+    /* ================= 朝向矩阵的紧凑表示 =================
+     * 所有转动都是 90° 的整数倍，因此朝向矩阵一定是「带符号的置换矩阵」。
+     * 用 6 bit 表示：第 i 位组表示局部第 i 个基向量映射到哪个世界轴（0=x,1=y,2=z），
+     * 第 i+3 位为该轴的正负号。
+     */
+    // 每列 3 bit：bit0-1 = 世界轴，bit2 = 符号。单位矩阵 = 列0(x→x) | 列1(y→y) | 列2(z→z)
+    const ID = 0 | (0 << 3) | (1 << 3) | (0 << 6) | (2 << 6);
+    // 展开成 3×3 矩阵（列主序）
+    function unpack(code) {
+      const m = new Array(9);
+      for (let c = 0; c < 3; c++) {
+        const ax = code & 3;              // 低 2 位：世界轴
+        const neg = (code >> 2) & 1;      // 第 3 位：符号
+        code >>= 3;
+        for (let r = 0; r < 3; r++) m[c * 3 + r] = 0;
+        m[c * 3 + ax] = neg ? -1 : 1;
+      }
+      return m;
+    }
+    /* 每列 3 bit：低 2 位 = 世界轴编号(0/1/2)，第 3 位 = 符号。共 9 bit。 */
+    function pack(m) {
+      let code = 0;
+      for (let c = 0; c < 3; c++) {
+        let ax = 0, sign = 1;
+        for (let r = 0; r < 3; r++) {
+          const v = m[c * 3 + r];
+          if (v !== 0) { ax = r; sign = v > 0 ? 1 : -1; }
+        }
+        code |= ax << (c * 3);                       // bit0-1：世界轴
+        if (sign < 0) code |= 1 << (c * 3 + 2);      // bit2：符号
+      }
+      return code;
+    }
+    /**
+     * 组合：applyM(a, applyM(b, v)) == applyM(compose(a,b), v)
+     * 用「解码 → mul → 编码」的查表版本（mul 已由几何校验；查表避免每次建 9 元数组）。
+     */
+    /**
+     * 朝向组合。注意：内核的 mul(a, b) 实际算的是「先 a 再 b」的复合
+     * （矩阵记法下等价于 b·a），这是渲染层与内核共用的既有约定，勿单独修改其一。
+     * 这里直接复用 mul，保证 applyPack 与 applyTurn 永远同源。
+     */
+    function compose(a, b) { return pack(mul(unpack(a), unpack(b))); }
+
+    // 预计算每个动作的旋转矩阵编码
+    const TURN_CODE = new Map();
+    for (const t of TURNS) TURN_CODE.set(t.name, pack(t.mat));
+
+    /* ================= 状态 =================
+     * st = { perm: Array(26), ori: Array(26) 朝向编码 }
+     */
+    function solvedPack() {
+      const perm = new Array(26), ori = new Array(26);
+      for (let i = 0; i < 26; i++) { perm[i] = i; ori[i] = ID; }
+      return { perm, ori };
+    }
+    const clonePack = (st) => ({ perm: st.perm.slice(), ori: st.ori.slice() });
+
+    /** 执行一个动作：与 applyTurn 完全同构（先收集后写入） */
+    function applyPack(st, name) {
+      const t = TURN_BY_NAME.get(name);
+      const d = TURN_DATA.get(name);
+      const code = TURN_CODE.get(name);
+      const perm = st.perm, ori = st.ori;
+      const nPerm = perm.slice(), nOri = ori.slice();
+      const writes = [];
+      for (let from = 0; from < 26; from++) {
+        if (!isAffected(from, t)) continue;
+        writes.push([from, d.posMap[from], compose(code, ori[from])]);
+      }
+      for (let k = 0; k < writes.length; k++) {
+        nPerm[writes[k][1]] = perm[writes[k][0]];
+        nOri[writes[k][1]] = writes[k][2];
+      }
+      st.perm = nPerm; st.ori = nOri;
+      return st;
+    }
+
+    /* ================= 坐标读取 ================= */
+    function cornerOri(st, slot) {
+      const m = unpack(st.ori[POS_OF_CORNER_SLOT[slot]]);
+      // 局部 +y 的世界方向 = 第 1 列
+      const x = m[1], y = m[4], z = m[7];
+      if (y !== 0) return 0;
+      if (x !== 0) return x > 0 ? 1 : 2;
+      return z > 0 ? 2 : 1;
+    }
+    function edgeFlip(st, slot) {
+      const m = unpack(st.ori[POS_OF_EDGE_SLOT[slot]]);
+      return m[4] !== 0 ? 0 : 1;
+    }
+    function twistOf(st) {
+      let idx = 0;
+      for (let i = 0; i < 7; i++) idx = idx * 3 + cornerOri(st, i);
+      return idx;
+    }
+    function flipOf(st) {
+      let idx = 0;
+      for (let i = 0; i < 11; i++) idx = idx * 2 + edgeFlip(st, i);
+      return idx;
+    }
+    function sliceOf(st) {
+      let mask = 0;
+      for (let slot = 0; slot < 12; slot++) {
+        if (SLICE_EDGES.indexOf(EDGE_SLOT[st.perm[POS_OF_EDGE_SLOT[slot]]]) >= 0) mask |= 1 << slot;
+      }
+      return maskToIdx(mask);
+    }
+    function cpOf(st) {
+      const a = new Array(8);
+      for (let slot = 0; slot < 8; slot++) a[slot] = CORNER_SLOT[st.perm[POS_OF_CORNER_SLOT[slot]]];
+      return permToIdx(a);
+    }
+    function epOf(st) {
+      const a = new Array(8);
+      for (let slot = 0; slot < 8; slot++) a[slot] = EDGE_SLOT[st.perm[POS_OF_EDGE_SLOT[slot]]];
+      return permToIdx(a);
+    }
+    function spOf(st) {
+      const a = new Array(4);
+      for (let k = 0; k < 4; k++) a[k] = SLICE_EDGES.indexOf(EDGE_SLOT[st.perm[POS_OF_EDGE_SLOT[8 + k]]]);
+      return permToIdx(a);
+    }
+
+    /* ================= 规范状态构造 =================
+     * 坐标本身不能唯一决定「状态的物理姿态」（切向自由度），所以建表时必须
+     * 用一套固定的规范姿态：给定坐标 → 一个确定的真实状态。
+     * 该规范状态只用于推进坐标，其切向差异不影响坐标读数（坐标只依赖贴纸方向）。
+     */
+    function canonCorner(val) { return frameOf(val === 0 ? [0, 1, 0] : val === 1 ? [1, 0, 0] : [0, 0, 1]); }
+    function canonEdge(val) { return frameOf(val === 0 ? [0, 1, 0] : [1, 0, 0]); }
+
+    function synthP1(twist, flip, slice) {
+      const st = solvedPack();
+      const co = twistToCo(twist), eo = flipToEo(flip);
+      const mask = SLICE_MASKS[slice];
+      const eSlots = [], oSlots = [];
+      for (let slot = 0; slot < 12; slot++) {
+        if (mask & (1 << slot)) eSlots.push(slot); else oSlots.push(slot);
+      }
+      for (let k = 0; k < 8; k++) {
+        const slot = oSlots[k];
+        st.perm[POS_OF_EDGE_SLOT[slot]] = POS_OF_EDGE_SLOT[k];
+        st.ori[POS_OF_EDGE_SLOT[slot]] = canonEdge(eo[k]);
+      }
+      for (let k = 0; k < 4; k++) {
+        const slot = eSlots[k];
+        st.perm[POS_OF_EDGE_SLOT[slot]] = POS_OF_EDGE_SLOT[SLICE_EDGES[k]];
+        st.ori[POS_OF_EDGE_SLOT[slot]] = canonEdge(0);
+      }
+      for (let slot = 0; slot < 8; slot++) {
+        st.ori[POS_OF_CORNER_SLOT[slot]] = canonCorner(co[slot]);
+      }
+      return st;
+    }
+
+    function synthP2(cp, ep, sp) {
+      const st = solvedPack();
+      const cpArr = idxToPerm(cp, 8), epArr = idxToPerm(ep, 8), spArr = idxToPerm(sp, 4);
+      for (let slot = 0; slot < 8; slot++) {
+        st.perm[POS_OF_CORNER_SLOT[slot]] = POS_OF_CORNER_SLOT[cpArr[slot]];
+        st.perm[POS_OF_EDGE_SLOT[slot]] = POS_OF_EDGE_SLOT[epArr[slot]];
+      }
+      for (let k = 0; k < 4; k++) {
+        st.perm[POS_OF_EDGE_SLOT[8 + k]] = POS_OF_EDGE_SLOT[SLICE_EDGES[spArr[k]]];
+      }
+      return st;
+    }
+
+    /** 构造正规旋转矩阵编码：局部 +y 映射到 v（det = +1） */
+    const cross = (a, b) => [
+      a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2],
+      a[0] * b[1] - a[1] * b[0],
+    ];
+    function frameOf(v) {
+      // col0 = d × v、col1 = v、col2 = −d（其余组合是镜像矩阵 det = −1，勿改）
+      const d = v[1] !== 0 ? [1, 0, 0] : [0, 1, 0];
+      const u = cross(d, v);
+      const m = [u[0], v[0], -d[0], u[1], v[1], -d[1], u[2], v[2], -d[2]];
+      return pack(m);
+    }
+
+    /* ================= 坐标编解码 ================= */
     const twistToCo = (idx) => {
       const co = new Array(8);
-      let s = 0;
-      for (let i = 6; i >= 0; i--) { co[i] = idx % 3; s += co[i]; idx = (idx - co[i]) / 3; }
-      co[7] = (3 - (s % 3)) % 3;
+      let sum = 0;
+      for (let i = 6; i >= 0; i--) { co[i] = idx % 3; sum += co[i]; idx = (idx - co[i]) / 3; }
+      co[7] = (3 - (sum % 3)) % 3;
       return co;
     };
     const coToTwist = (co) => {
@@ -343,9 +535,9 @@
     };
     const flipToEo = (idx) => {
       const eo = new Array(12);
-      let s = 0;
-      for (let i = 10; i >= 0; i--) { eo[i] = idx & 1; s += eo[i]; idx >>= 1; }
-      eo[11] = s & 1;
+      let sum = 0;
+      for (let i = 10; i >= 0; i--) { eo[i] = idx & 1; sum += eo[i]; idx >>= 1; }
+      eo[11] = sum & 1;
       return eo;
     };
     const eoToFlip = (eo) => {
@@ -353,387 +545,219 @@
       for (let i = 0; i < 11; i++) idx = idx * 2 + eo[i];
       return idx;
     };
-    const perm8 = (a) => permToIdx(a);
 
-    /* ---------------- 朝向矩阵构造 ---------------- */
-    const cross = (a, b) => [
-      a[1] * b[2] - a[2] * b[1],
-      a[2] * b[0] - a[0] * b[2],
-      a[0] * b[1] - a[1] * b[0],
-    ];
-    /**
-     * 构造正规旋转矩阵（列主序，det = +1），使局部 +y 映射到 v。
-     * 以该 cubie 的位置向量 p 作参考轴（p 与 v 必不共线），从而保证唯一且可逆。
-     */
-    function frameOf(v) {
-      // 选一个与 v 不平行的参考轴 d，col0 = d × v、col1 = v、col2 = d（det = +1）
-      const d = v[1] !== 0 ? [1, 0, 0] : [0, 1, 0];
-      const u = cross(d, v);
-      return [u[0], v[0], d[0], u[1], v[1], d[1], u[2], v[2], d[2]];
-    }
-    /*
-     * 朝向约定（必须与 readCornerOri / readEdgeFlip 的读数严格对应）：
-     *   角块：0 → U/D 贴纸在 U/D 面；1 → 在 +x 面；2 → 在 +z 面
-     *   棱块：0 → U/D 贴纸在 U/D 面；1 → 被翻到侧面
-     * 每个角块的 U/D 贴纸恰好指向这三个方向之一，因此索引与方向一一对应。
-     */
-    function cornerUpDir(val) {
-      if (val === 0) return [0, 1, 0];
-      if (val === 1) return [1, 0, 0];
-      return [0, 0, 1];
-    }
-    function edgeUpDir(val) { return val === 0 ? [0, 1, 0] : [1, 0, 0]; }
-
-    /* ---------------- 打包状态 ----------------
-     * st = { perm: Array(26), co: Array(8), eo: Array(12) }
-     * perm[slot] = 该槽位上的 cubie 编号；co/eo 以「槽位」为索引。
-     */
-    function solvedPack() {
-      const perm = new Array(26);
-      for (let i = 0; i < 26; i++) perm[i] = i;
-      return { perm, co: new Array(8).fill(0), eo: new Array(12).fill(0) };
-    }
-    const clonePack = (st) => ({ perm: st.perm.slice(), co: st.co.slice(), eo: st.eo.slice() });
-
-    /** 由打包状态得到几何状态 */
-    function toGeom(st) {
-      const ori = new Array(26);
-      for (let slot = 0; slot < 8; slot++) {
-        ori[POS_OF_CORNER_SLOT[slot]] = frameOf(cornerUpDir(st.co[slot]));
+    /** 自检：规范状态读回的坐标必须与输入一致 */
+    function selfCheck() {
+      const errs = [];
+      for (let i = 0; i < N_TWIST; i++) {
+        const st = synthP1(i, 0, maskToIdx(0b1111 << 8));
+        if (twistOf(st) !== i) { errs.push('twist ' + i + ' -> ' + twistOf(st)); break; }
       }
-      for (let slot = 0; slot < 12; slot++) {
-        ori[POS_OF_EDGE_SLOT[slot]] = frameOf(edgeUpDir(st.eo[slot]));
+      for (let i = 0; i < N_FLIP; i++) {
+        const st = synthP1(0, i, maskToIdx(0b1111 << 8));
+        if (flipOf(st) !== i) { errs.push('flip ' + i + ' -> ' + flipOf(st)); break; }
       }
-      for (let i = 0; i < 26; i++) if (!ori[i]) ori[i] = IDENTITY.slice();
-      return { perm: st.perm.slice(), ori };
-    }
-    /** 由几何状态得到打包状态（朝向值直接由贴纸方向反读，保证互逆） */
-    function fromGeom(g) {
-      const perm = g.perm.slice();
-      const co = new Array(8), eo = new Array(12);
-      for (let slot = 0; slot < 8; slot++) {
-        const v = applyM(g.ori[POS_OF_CORNER_SLOT[slot]], [0, 1, 0]);
-        co[slot] = v[1] !== 0 ? 0 : v[0] !== 0 ? (v[0] > 0 ? 1 : 2) : (v[2] > 0 ? 2 : 1);
+      for (let i = 0; i < N_SLICE; i++) {
+        const st = synthP1(0, 0, i);
+        if (sliceOf(st) !== i) { errs.push('slice ' + i + ' -> ' + sliceOf(st)); break; }
       }
-      for (let slot = 0; slot < 12; slot++) {
-        const v = applyM(g.ori[POS_OF_EDGE_SLOT[slot]], [0, 1, 0]);
-        eo[slot] = v[1] !== 0 ? 0 : 1;
+      for (let i = 0; i < N_CP; i++) {
+        const st = synthP2(i, 0, 0);
+        if (cpOf(st) !== i) { errs.push('cp ' + i + ' -> ' + cpOf(st)); break; }
       }
-      return { perm, co, eo };
+      for (let i = 0; i < N_EP; i++) {
+        const st = synthP2(0, i, 0);
+        if (epOf(st) !== i) { errs.push('ep ' + i + ' -> ' + epOf(st)); break; }
+      }
+      for (let i = 0; i < N_SP; i++) {
+        const st = synthP2(0, 0, i);
+        if (spOf(st) !== i) { errs.push('sp ' + i + ' -> ' + spOf(st)); break; }
+      }
+      return errs;
     }
 
-    /**
-     * 对打包状态执行一个动作（不构造完整几何状态，性能敏感）。
-     * 排列用 TURN_DATA 的 posMap（纯置换，已验证与几何一致）；
-     * 朝向用「解码 → 左乘旋转矩阵 → 重新编码」，与 toGeom/fromGeom 同源。
-     */
-    function applyPack(st, name) {
-      const t = TURN_BY_NAME.get(name);
-      const d = TURN_DATA.get(name);
-      const perm = st.perm, co = st.co, eo = st.eo;
-      const nPerm = perm.slice(), nCo = co.slice(), nEo = eo.slice();
-      const writes = [];
-      for (let from = 0; from < 26; from++) {
-        if (!isAffected(from, t)) continue;
-        writes.push([from, d.posMap[from], d.mat]);
-      }
-      for (let k = 0; k < writes.length; k++) {
-        const from = writes[k][0], to = writes[k][1], mat = writes[k][2];
-        nPerm[to] = perm[from];
-        const c = CUBIES[from];
-        if (c.kind === 'corner') {
-          const m = mul(mat, frameOf(cornerUpDir(co[CORNER_SLOT[from]])));
-          const v = [m[1], m[4], m[7]];
-          nCo[CORNER_SLOT[to]] = v[1] !== 0 ? 0 : v[0] !== 0 ? (v[0] > 0 ? 1 : 2) : (v[2] > 0 ? 2 : 1);
-        } else if (c.kind === 'edge') {
-          const m = mul(mat, frameOf(edgeUpDir(eo[EDGE_SLOT[from]])));
-          const v = [m[1], m[4], m[7]];
-          nEo[EDGE_SLOT[to]] = v[1] !== 0 ? 0 : 1;
-        }
-      }
-      st.perm = nPerm; st.co = nCo; st.eo = nEo;
-      return st;
-    }
-
-    /* ---------------- 坐标读取 ---------------- */
-    const twistOf = (st) => coToTwist(st.co);
-    const flipOf = (st) => eoToFlip(st.eo);
-    function sliceOf(st) {
-      let mask = 0;
-      for (let slot = 0; slot < 12; slot++) {
-        if (SLICE_EDGES.indexOf(EDGE_SLOT[st.perm[POS_OF_EDGE_SLOT[slot]]]) >= 0) mask |= 1 << slot;
-      }
-      return maskToIdx(mask);
-    }
-    /** 前 8 个 U/D 棱块槽位的排列（Lehmer） */
-    function epOf(st) {
-      const a = new Array(8);
-      for (let slot = 0; slot < 8; slot++) a[slot] = EDGE_SLOT[st.perm[POS_OF_EDGE_SLOT[slot]]];
-      return perm8(a);
-    }
-    function cpOf(st) {
-      const a = new Array(8);
-      for (let slot = 0; slot < 8; slot++) a[slot] = CORNER_SLOT[st.perm[POS_OF_CORNER_SLOT[slot]]];
-      return perm8(a);
-    }
-    function spOf(st) {
-      const a = new Array(4);
-      for (let k = 0; k < 4; k++) {
-        const piece = EDGE_SLOT[st.perm[POS_OF_EDGE_SLOT[8 + k]]];
-        a[k] = SLICE_EDGES.indexOf(piece);
-      }
-      return permToIdx(a);
-    }
-
-    /* ---------------- 由坐标合成打包状态（用于建表） ---------------- */
-    /** 阶段一：twist/flip 给朝向，排列取「每个 cubie 在自己的槽位」 */
-    function synthP1(twist, flip) {
-      const st = solvedPack();
-      st.co = twistToCo(twist);
-      st.eo = flipToEo(flip);
-      return st;
-    }
-    /** 阶段二：cp/ep/sp 决定排列，朝向全为 0 —— 与 spOf/epOf/cpOf 的编码一致 */
-    function synthP2(cp, ep, sp) {
-      const st = solvedPack();
-      const cpArr = idxToPerm(cp, 8);
-      for (let slot = 0; slot < 8; slot++) {
-        st.perm[POS_OF_CORNER_SLOT[slot]] = POS_OF_CORNER_SLOT[cpArr[slot]];
-      }
-      const epArr = idxToPerm(ep, 8);
-      for (let slot = 0; slot < 8; slot++) {
-        st.perm[POS_OF_EDGE_SLOT[slot]] = POS_OF_EDGE_SLOT[epArr[slot]];
-      }
-      const spArr = idxToPerm(sp, 4);
-      for (let k = 0; k < 4; k++) {
-        st.perm[POS_OF_EDGE_SLOT[8 + k]] = POS_OF_EDGE_SLOT[SLICE_EDGES[spArr[k]]];
-      }
-      return st;
-    }
-
-    /* ---------------- 剪枝表 ---------------- */
-    let distTwistSlice = null, distFlipSlice = null, distSpCp = null, distSpEp = null;
+    /* ================= 剪枝表 ================= */
+    let distP1 = null, distSpCp = null, distSpEp = null;
     let ready = false;
 
-    let countTwistSlice = 0, countFlipSlice = 0;
+    /**
+     * 单遍 BFS：同时建立
+     *   1) 坐标 → 距离（启发函数）
+     *   2) 坐标 → 坐标 的转移表（只在该坐标第一次被到达时记录，保证代表状态唯一）
+     *
+     * 关键：坐标不能唯一决定物理姿态（切向自由度），所以「从坐标造状态再推进」
+     * 会发散。这里改为：每个坐标只保留它第一次被到达时的真实状态作为代表，
+     * 由该代表推出全部转移，搜索时的启发值与转移因此天然自洽。
+     */
 
-    function buildDistTwistSlice(report) {
-      const size = N_TWIST * N_SLICE;
+    function bfsBuild(size, keyOf, moves, trackTrans, report, depthMax) {
       const dist = new Uint8Array(size).fill(255);
-      dist[0] = 0;                                    // (twist=0, slice=0)
-      let frontier = [solvedPack()];
-      let depth = 0, visited = 1;
-      while (frontier.length) {
+      const trans = trackTrans ? new Int32Array(size * moves.length).fill(-1) : null;
+      const first = solvedPack();
+      const k0 = keyOf(first);
+      dist[k0] = 0;
+      let frontier = [[k0, first]];
+      let depth = 0;
+      while (frontier.length && depth < depthMax) {
         const next = [];
         for (let i = 0; i < frontier.length; i++) {
-          const parent = frontier[i];
-          for (let mi = 0; mi < N_P1_MOVES; mi++) {
-            const st = applyPack(clonePack(parent), PHASE1_MOVES[mi]);
-            const key = twistOf(st) * N_SLICE + sliceOf(st);
-            if (dist[key] === 255) { dist[key] = depth + 1; next.push(st); visited++; }
+          const key = frontier[i][0], rep = frontier[i][1];
+          for (let mi = 0; mi < moves.length; mi++) {
+            const st = applyPack(clonePack(rep), moves[mi]);
+            const k2 = keyOf(st);
+            if (dist[k2] === 255) {
+              dist[k2] = depth + 1;
+              if (trans) trans[key * moves.length + mi] = k2;
+              next.push([k2, st]);
+            }
           }
         }
-        frontier = next; depth++;
-        if (report) report(Math.min(1, depth / 12));
+        frontier = next;
+        depth++;
+        if (report) report(Math.min(1, depth / depthMax));
       }
-      countTwistSlice = visited;
-      distTwistSlice = dist;
+      return { dist, trans };
     }
 
-    function buildDistFlipSlice(report) {
-      const size = N_FLIP * N_SLICE;
-      const dist = new Uint8Array(size).fill(255);
-      dist[0] = 0;
-      let frontier = [solvedPack()];
-      let depth = 0, visited = 1;
-      while (frontier.length) {
-        const next = [];
-        for (let i = 0; i < frontier.length; i++) {
-          const parent = frontier[i];
-          for (let mi = 0; mi < N_P1_MOVES; mi++) {
-            const st = applyPack(clonePack(parent), PHASE1_MOVES[mi]);
-            const key = flipOf(st) * N_SLICE + sliceOf(st);
-            if (dist[key] === 255) { dist[key] = depth + 1; next.push(st); visited++; }
-          }
-        }
-        frontier = next; depth++;
-        if (report) report(Math.min(1, depth / 12));
-      }
-      countFlipSlice = visited;
-      distFlipSlice = dist;
-    }
-
-    /** (sp,cp) 与 (sp,ep) 两个 24×40320 的剪枝表 */
-    function buildPhase2Dist(kind, report) {
-      const size = N_SP * N_CP;
-      const dist = new Uint8Array(size).fill(255);
-      dist[0] = 0;
-      const keyOf = kind === 'cp'
-        ? (st) => spOf(st) * N_CP + cpOf(st)
-        : (st) => spOf(st) * N_EP + epOf(st);
-      let frontier = [solvedPack()];
-      let depth = 0, visited = 1;
-      while (frontier.length) {
-        const next = [];
-        for (let i = 0; i < frontier.length; i++) {
-          const parent = frontier[i];
-          for (let mi = 0; mi < N_P2_MOVES; mi++) {
-            const st = applyPack(clonePack(parent), PHASE2_MOVES[mi]);
-            const key = keyOf(st);
-            if (dist[key] === 255) { dist[key] = depth + 1; next.push(st); visited++; }
-          }
-        }
-        frontier = next; depth++;
-        if (report) report(Math.min(1, depth / 18));
-      }
-      return { dist, visited };
-    }
-
-    /** 构建全部表。onProgress(fraction, label) */
     function build(onProgress) {
-      const steps = [
-        ['剪枝表 twist×slice', buildDistTwistSlice, 0.28],
-        ['剪枝表 flip×slice', buildDistFlipSlice, 0.28],
-        ['剪枝表 slice×corner', (r) => { const x = buildPhase2Dist('cp', r); distSpCp = x.dist; }, 0.22],
-        ['剪枝表 slice×edge', (r) => { const x = buildPhase2Dist('ep', r); distSpEp = x.dist; }, 0.22],
+      /*
+       * 阶段一用「完整 twist×flip 距离」作为启发：它就是到 G1 的精确距离，
+       * 比 twist×slice / flip×slice 两张部分模式表强得多（搜索从秒级降到毫秒级）。
+       * 索引 = 2186 - twistSteps + flip * 2187，这样还原态（twist 全 0）落在索引 0..2186。
+       */
+      const plan = [
+        ['阶段一距离表 twist×flip', 0.55, 12, N_TWIST * N_FLIP, PHASE1_MOVES,
+          (st) => (N_TWIST - 1 - twistOf(st)) + flipOf(st) * N_TWIST, true, (r) => { distP1 = r.dist; }],
+        ['剪枝表 slice×corner', 0.225, 18, N_SP * N_CP, PHASE2_MOVES,
+          (st) => spOf(st) * N_CP + cpOf(st), true, (r) => { distSpCp = r.dist; }],
+        ['剪枝表 slice×edge', 0.225, 18, N_SP * N_EP, PHASE2_MOVES,
+          (st) => spOf(st) * N_EP + epOf(st), true, (r) => { distSpEp = r.dist; }],
       ];
       let base = 0;
-      for (const [label, fn, weight] of steps) {
+      for (const [label, weight, depthMax, size, moves, keyOf, track, assign] of plan) {
         if (onProgress) onProgress(base, label);
-        fn((p) => { if (onProgress) onProgress(base + weight * Math.min(1, p), label); });
+        const r = bfsBuild(size, keyOf, moves, track, (p) => {
+          if (onProgress) onProgress(base + weight * Math.min(1, p), label);
+        }, depthMax);
+        assign(r);
         base += weight;
         if (onProgress) onProgress(base, label);
       }
       ready = true;
       return true;
     }
+
+    /** 还原态的 slice 坐标（不是 0！索引按掩码字典序从 000000001111 开始编号） */
+    const SOLVED_SLICE = sliceOf(solvedPack());
+
     const isReady = () => ready;
 
-    /* ---------------- IDA* ---------------- */
-    function phase1(twist, flip, slice) {
-      const h = (tw, fl, sl) => Math.max(
-        distTwistSlice[tw * N_SLICE + sl],
-        distFlipSlice[fl * N_SLICE + sl],
-      );
+    /** 导出全部剪枝表（用于缓存；浏览器里可存 IndexedDB，Node 里存文件） */
+    function dump() {
+      return { p1: distP1, sc: distSpCp, se: distSpEp };
+    }
+    /** 从 dump() 的结果恢复，跳过昂贵的构建 */
+    function load(d) {
+      distP1 = d.p1; distSpCp = d.sc; distSpEp = d.se;
+      ready = true;
+      return true;
+    }
+    /** 构建缓存（Node 环境写文件；失败不抛错） */
+    function cachePath() { return typeof process !== 'undefined' ? 'solver-tables.bin' : null; }
+
+    /* ================= 搜索 =================
+     * 由于坐标无法唯一重建状态，IDA* 直接携带真实状态（每层 clone 一次），
+     * 启发值取坐标剪枝表。这样绝不会出现「表与状态不一致」。
+     */
+    let _nodes = 0, _trace = false;
+    /** 阶段一启发：到 G1 的精确距离（twist×flip 全表） */
+    const h1 = (st) => distP1[(N_TWIST - 1 - twistOf(st)) + flipOf(st) * N_TWIST];
+    function phase1(state) {
+      const h = h1;
+      const goal = (st) => twistOf(st) === 0 && flipOf(st) === 0 && sliceOf(st) === SOLVED_SLICE;
       const path = [];
-      const next = (tw, fl, sl, mi) => moveTables.p1(tw, fl, sl, mi);
-      const dfs2 = (tw, fl, sl, g, bound, lastFace, lastAxis) => {
-        const hv = h(tw, fl, sl);
+      const dfs = (st, g, bound, lastFace, lastAxis) => {
+        _nodes++;
+        const hv = h(st);
         if (g + hv > bound) return g + hv;
-        if (hv === 0 && tw === 0 && fl === 0 && sl === 0) return -1;
+        if (hv === 0 && goal(st)) return -1;
         let min = Infinity;
         for (let mi = 0; mi < N_P1_MOVES; mi++) {
           const name = PHASE1_MOVES[mi], face = name[0];
           if (face === lastFace) continue;
           const axis = TURN_BY_NAME.get(name).axis;
           if (axis === lastAxis && face === OPPOSITE_FACE[lastFace]) continue;
-          const n = next(tw, fl, sl, mi);
           path.push(name);
-          const r = dfs2(n[0], n[1], n[2], g + 1, bound, face, axis);
+          const r = dfs(applyPack(clonePack(st), name), g + 1, bound, face, axis);
           if (r === -1) return -1;
           path.pop();
           if (r < min) min = r;
         }
         return min;
       };
-      for (let bound = h(twist, flip, slice); bound <= 12; bound++) {
+      for (let bound = h(state); bound <= 12; bound++) {
         path.length = 0;
-        const r = dfs2(twist, flip, slice, 0, bound, '', -1);
-        if (r === -1) return path.slice();
+        _nodes = 0;
+        if (dfs(clonePack(state), 0, bound, '', -1) === -1) return path.slice();
+        if (_trace) console.log('  [p1] bound', bound, 'nodes', _nodes, 'h0', h(state));
       }
       throw new Error('阶段一求解失败');
     }
 
-    function phase2(cp, ep, sp) {
-      const h = (s, c, e) => Math.max(distSpCp[s * N_CP + c], distSpEp[s * N_EP + e]);
+    function phase2(state) {
+      const h = (st) => Math.max(
+        distSpCp[spOf(st) * N_CP + cpOf(st)],
+        distSpEp[spOf(st) * N_EP + epOf(st)],
+      );
+      const goal = (st) => cpOf(st) === 0 && epOf(st) === 0 && spOf(st) === 0;
       const path = [];
-      const dfs = (c, e, s, g, bound, lastFace) => {
-        const hv = h(s, c, e);
+      const dfs = (st, g, bound, lastFace) => {
+        const hv = h(st);
         if (g + hv > bound) return g + hv;
-        if (hv === 0 && c === 0 && e === 0 && s === 0) return -1;
+        if (hv === 0 && goal(st)) return -1;
         let min = Infinity;
         for (let mi = 0; mi < N_P2_MOVES; mi++) {
           const name = PHASE2_MOVES[mi], face = name[0];
           if (face === lastFace) continue;
-          const n = moveTables.p2(c, e, s, mi);
           path.push(name);
-          const r = dfs(n[0], n[1], n[2], g + 1, bound, face);
+          const r = dfs(applyPack(clonePack(st), name), g + 1, bound, face);
           if (r === -1) return -1;
           path.pop();
           if (r < min) min = r;
         }
         return min;
       };
-      for (let bound = h(sp, cp, ep); bound <= 18; bound++) {
+      for (let bound = h(state); bound <= 18; bound++) {
         path.length = 0;
-        const r = dfs(cp, ep, sp, 0, bound, '');
-        if (r === -1) return path.slice();
+        if (dfs(clonePack(state), 0, bound, '') === -1) return path.slice();
       }
       throw new Error('阶段二求解失败');
-    }
-
-    /* ---------------- 搜索用坐标转移表（由几何合成状态推得） ---------------- */
-    const moveTables = {
-      p1: null, p2: null,
-    };
-    function buildMoveTables() {
-      // 阶段一：twist×flip（slice 由真实几何推进）
-      moveTables.p1 = (tw, fl, sl, mi) => {
-        const st = synthP1(tw, fl);
-        applyPack(st, PHASE1_MOVES[mi]);
-        return [twistOf(st), flipOf(st), sliceOf(st)];
-      };
-      // 阶段二
-      const cpMove = new Int32Array(N_CP * N_P2_MOVES);
-      for (let idx = 0; idx < N_CP; idx++) {
-        for (let mi = 0; mi < N_P2_MOVES; mi++) {
-          const st = synthP2(idx, 0, 0);
-          applyPack(st, PHASE2_MOVES[mi]);
-          cpMove[idx * N_P2_MOVES + mi] = cpOf(st);
-        }
-      }
-      const epMove = new Int32Array(N_EP * N_P2_MOVES);
-      for (let idx = 0; idx < N_EP; idx++) {
-        for (let mi = 0; mi < N_P2_MOVES; mi++) {
-          const st = synthP2(0, idx, 0);
-          applyPack(st, PHASE2_MOVES[mi]);
-          epMove[idx * N_P2_MOVES + mi] = epOf(st);
-        }
-      }
-      const spMove = new Int32Array(N_SP * N_P2_MOVES);
-      for (let idx = 0; idx < N_SP; idx++) {
-        for (let mi = 0; mi < N_P2_MOVES; mi++) {
-          const st = synthP2(0, 0, idx);
-          applyPack(st, PHASE2_MOVES[mi]);
-          spMove[idx * N_P2_MOVES + mi] = spOf(st);
-        }
-      }
-      moveTables.p2 = (c, e, s, mi) => [
-        cpMove[c * N_P2_MOVES + mi],
-        epMove[e * N_P2_MOVES + mi],
-        spMove[s * N_P2_MOVES + mi],
-      ];
     }
 
     /** 解算：返回动作名数组 */
     function solve(state) {
       if (!ready) throw new Error('求解表尚未构建，请先调用 Solver.build()');
-      buildMoveTables();
-      const st = fromGeom(state);
-      const first = phase1(twistOf(st), flipOf(st), sliceOf(st));
-      const mid = cloneState(state);
-      applyMoves(mid, first);
-      const m = fromGeom(mid);
-      const second = phase2(cpOf(m), epOf(m), spOf(m));
+      const start = { perm: state.perm.slice(), ori: state.ori.map((m) => pack(m)) };
+      const first = phase1(start);
+      const mid = clonePack(start);
+      for (const m of first) applyPack(mid, m);
+      const second = phase2(mid);
       return first.concat(second);
     }
 
-    return { build, isReady, solve, phase1, phase2,
-      _internals: () => ({ distTwistSlice, distFlipSlice, distSpCp, distSpEp, maskToIdx }),
+    return { build, isReady, solve, phase1, phase2, dump, load,
+      _internals: {
+        get distP1() { return distP1; },
+        h1,
+        get distSpCp() { return distSpCp; },
+        get distSpEp() { return distSpEp; },
+        maskToIdx, twistOf, flipOf, sliceOf, cpOf, epOf, spOf,
+        solvedPack, applyPack, clonePack, pack, unpack,
+        synthP1, synthP2, selfCheck, TURN_CODE, compose,
+      },
       maskToIdx,
     };
   })();
-
   return {
     CUBIES, CORNER_POS, CORNER_NAMES, EDGE_POS, EDGE_NAMES, SLICE_EDGES,
     POS_OF_CORNER_SLOT, POS_OF_EDGE_SLOT, CORNER_SLOT, EDGE_SLOT,

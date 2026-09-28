@@ -1,4 +1,4 @@
-const C = require('./cube-core.js');
+const C = require('../cube-core.js');
 // 闭环自检：用内核公开接口验证 applyPack 与几何 applyTurn 完全一致
 // 做法：把几何状态转成坐标，再逐步用 applyPack 推进，比对每一步的读取值
 function packFromGeom(g) {

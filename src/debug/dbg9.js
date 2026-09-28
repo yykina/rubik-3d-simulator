@@ -1,4 +1,4 @@
-const C = require('./cube-core.js');
+const C = require('../cube-core.js');
 // 复刻构建逻辑，打印 L 的细节
 function frameFrom(v){
   const d = v[1]!==0?[1,0,0]:[0,1,0];

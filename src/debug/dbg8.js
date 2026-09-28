@@ -1,4 +1,4 @@
-const C = require('./cube-core.js');
+const C = require('../cube-core.js');
 C.Solver.build(()=>{});
 const I = C.Solver._internals();
 const N_P2=10, N_P1=18;

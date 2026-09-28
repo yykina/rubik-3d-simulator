@@ -1,4 +1,4 @@
-const C = require('./cube-core.js');
+const C = require('../cube-core.js');
 const I = C.Solver._internals();
 // 用 Solver 内部函数不方便，直接复刻：验证 co 的编码/解码闭环 + L 的转移
 function cross(a,b){return [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];}
