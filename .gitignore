@@ -1,3 +1,10 @@
 node_modules/
 *.log
 .DS_Store
+
+# 求解器剪枝表缓存（6 MB，可用 npm run tables 重新生成）
+src/debug/solver-tables.bin
+
+# 浏览器测试产物
+.pw-browsers/
+.npm-cache/

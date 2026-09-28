@@ -377,9 +377,39 @@
     /**
      * 朝向组合。注意：内核的 mul(a, b) 实际算的是「先 a 再 b」的复合
      * （矩阵记法下等价于 b·a），这是渲染层与内核共用的既有约定，勿单独修改其一。
-     * 这里直接复用 mul，保证 applyPack 与 applyTurn 永远同源。
+     * 这里用「由 mul 生成」的 24×24 查表实现：语义与 mul 完全一致，但快得多。
      */
-    function compose(a, b) { return pack(mul(unpack(a), unpack(b))); }
+    const VALID_CODES = [];
+    {
+      const seen = new Map();
+      const q = [pack(IDENTITY)];
+      seen.set(q[0], true);
+      const AXS = [0, 1, 2];
+      while (q.length) {
+        const code = q.pop();
+        VALID_CODES.push(code);
+        const m = unpack(code);
+        for (const ax of AXS) {
+          const rot = ax === 0 ? [1, 0, 0, 0, 0, 1, 0, -1, 0]
+            : ax === 1 ? [0, 0, -1, 0, 1, 0, 1, 0, 0]
+            : [0, 1, 0, -1, 0, 0, 0, 0, 1];
+          const n = pack(mul(rot, m));
+          if (!seen.has(n)) { seen.set(n, true); q.push(n); }
+        }
+      }
+    }
+    const CODE_INDEX = new Uint8Array(512).fill(255);
+    VALID_CODES.forEach((c, i) => { CODE_INDEX[c] = i; });
+    const COMPOSE_TABLE = new Uint8Array(VALID_CODES.length * VALID_CODES.length);
+    for (let i = 0; i < VALID_CODES.length; i++) {
+      for (let j = 0; j < VALID_CODES.length; j++) {
+        COMPOSE_TABLE[i * VALID_CODES.length + j] =
+          CODE_INDEX[pack(mul(unpack(VALID_CODES[i]), unpack(VALID_CODES[j])))];
+      }
+    }
+    function compose(a, b) {
+      return VALID_CODES[COMPOSE_TABLE[CODE_INDEX[a] * VALID_CODES.length + CODE_INDEX[b]]];
+    }
 
     // 预计算每个动作的旋转矩阵编码
     const TURN_CODE = new Map();
@@ -677,7 +707,6 @@
       const goal = (st) => twistOf(st) === 0 && flipOf(st) === 0 && sliceOf(st) === SOLVED_SLICE;
       const path = [];
       const dfs = (st, g, bound, lastFace, lastAxis) => {
-        _nodes++;
         const hv = h(st);
         if (g + hv > bound) return g + hv;
         if (hv === 0 && goal(st)) return -1;
@@ -697,9 +726,7 @@
       };
       for (let bound = h(state); bound <= 12; bound++) {
         path.length = 0;
-        _nodes = 0;
         if (dfs(clonePack(state), 0, bound, '', -1) === -1) return path.slice();
-        if (_trace) console.log('  [p1] bound', bound, 'nodes', _nodes, 'h0', h(state));
       }
       throw new Error('阶段一求解失败');
     }

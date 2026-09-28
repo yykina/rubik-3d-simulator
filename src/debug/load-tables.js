@@ -2,7 +2,7 @@
 const fs = require('fs');
 const C = require('../cube-core.js');
 const FILE = __dirname + '/solver-tables.bin';
-const MAGIC = 'CB06';
+const MAGIC = 'CB07';
 const N = [2187 * 2048, 24 * 40320, 24 * 40320];
 module.exports = function loadTables() {
   const buf = fs.readFileSync(FILE);

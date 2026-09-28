@@ -77,7 +77,7 @@ if (fs.existsSync(FILE)) {
   try {
     const buf = fs.readFileSync(FILE);
     const N = [2187 * 2048, 24 * 40320, 24 * 40320];
-    if (buf.subarray(0, 4).toString() === 'CB06') {
+    if (buf.subarray(0, 4).toString() === 'CB07') {
       let off = 4;
       const parts = N.map((n) => { const a = new Uint8Array(buf.buffer, buf.byteOffset + off, n); off += n; return a; });
       C.Solver.load({ p1: parts[0], sc: parts[1], se: parts[2] });

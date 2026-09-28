@@ -214,7 +214,7 @@ const state = Core.solvedState();
 let history = [];
 let moveCount = 0;
 let timerStart = null, timerRunning = false;
-let scrambling = false, autoplayToken = 0;
+let scrambling = false;
 
 /** 内核的 3×3 列主序矩阵 → THREE 四元数（与内核的乘法顺序保持一致） */
 function toQuat(m) {
@@ -434,10 +434,17 @@ addEventListener('keydown', (ev) => {
   }
 });
 
-/* ============================== 求解器（Worker） ============================== */
-let worker = null, solverReady = false, pending = null, seq = 0, autoplaying = false;
+/* ============================== 求解器接入 ============================== */
+/*
+ * 架构：Worker 只负责「构建 / 读取剪枝表」并把 ArrayBuffer 回传；
+ * 求解在主线程调用同一份 cube-core（毫秒级，最坏约 2 秒），
+ * 这样求解路径与 Node 测试完全一致，避免跨线程状态边界带来的隐性 bug。
+ */
+let worker = null;
+let solverReady = false;          // 表是否已加载进主线程
 const solverStateEl = $('solver-state');
 const toastEl = $('toast'), toastText = $('toast-text'), toastBar = $('toast-bar');
+let pendingSolve = null, solveSeq = 0;
 
 (function initWorker() {
   try { worker = new Worker('solver-worker.js'); }
@@ -448,23 +455,29 @@ const toastEl = $('toast'), toastText = $('toast-text'), toastBar = $('toast-bar
       toastEl.classList.add('show');
       toastText.textContent = `${m.label} … ${m.pct}%`;
       toastBar.style.width = m.pct + '%';
-    } else if (m.type === 'ready') {
-      solverReady = true;
-      solverStateEl.textContent = m.cached ? '就绪（本地缓存）' : '就绪';
+    } else if (m.type === 'tables') {
+      try {
+        Core.Solver.load({
+          p1: new Uint8Array(m.p1), sc: new Uint8Array(m.sc), se: new Uint8Array(m.se),
+        });
+        solverReady = true;
+        solverStateEl.textContent = m.cached ? '就绪（本地缓存）' : '就绪';
+        toastEl.classList.remove('show');
+        $('btn-hint').disabled = false;
+        $('btn-solve').disabled = false;
+        if (pendingSolve) { const cb = pendingSolve; pendingSolve = null; cb(); }
+      } catch (e) {
+        solverStateEl.textContent = '加载失败';
+        flashStatus('求解表加载失败：' + (e && e.message || e));
+      }
+    } else if (m.type === 'failed') {
+      solverStateEl.textContent = '不可用';
       toastEl.classList.remove('show');
-      $('btn-hint').disabled = false;
-      $('btn-solve').disabled = false;
-    } else if (m.type === 'solution') {
-      const cb = pending && pending.id === m.id ? pending.cb : null;
-      pending = null;
-      setSolving(false);
-      if (cb) cb(m.moves, m.ms);
-    } else if (m.type === 'error') {
-      pending = null; setSolving(false);
-      flashStatus('求解失败：' + m.message);
+      flashStatus('求解表构建失败：' + m.message);
     }
   };
   worker.onerror = () => { solverStateEl.textContent = '不可用'; toastEl.classList.remove('show'); };
+  worker.postMessage({ type: 'init' });
 })();
 
 function setSolving(on) {
@@ -472,17 +485,29 @@ function setSolving(on) {
   $('btn-solve').disabled = on || !solverReady;
   $('btn-hint').disabled = on || !solverReady;
 }
+
+/** 请求解算；表还没就绪时排队等待 */
 function requestSolve(cb) {
-  if (!solverReady || !worker) { flashStatus('求解器还在准备中，请稍候'); return; }
+  if (!solverReady) {
+    flashStatus('求解表还在准备中，就绪后会自动继续');
+    pendingSolve = () => requestSolve(cb);
+    return;
+  }
   if (anim || queue.length) { flashStatus('请等当前动画结束'); return; }
-  const id = ++seq;
-  pending = { id, cb };
   setSolving(true);
-  worker.postMessage({
-    type: 'solve', id,
-    perm: state.perm.slice(),
-    ori: state.ori.map((m) => m.slice()),
-  });
+  flashStatus('求解中…');
+  // 让浏览器先画出状态再开始计算
+  setTimeout(() => {
+    let moves = null, err = null;
+    const t0 = performance.now();
+    try {
+      moves = Core.Solver.solve({ perm: state.perm.slice(), ori: state.ori.map((m) => m.slice()) });
+    } catch (e) { err = e; }
+    const ms = Math.round(performance.now() - t0);
+    setSolving(false);
+    if (err) { flashStatus('求解失败：' + (err.message || err)); return; }
+    cb(moves, ms);
+  }, 50);
 }
 
 /* 解序列展示与自动播放 */
@@ -493,17 +518,16 @@ function renderSolution() {
   solutionEl.classList.add('show');
   solutionEl.innerHTML = shown
     .map((m, i) => `<span class="m ${i < playedCount ? 'done' : i === playedCount ? 'next' : ''}">${m}</span>`)
-    .join('');
+    .join(' ');
 }
 function hideSolution() { shown = []; solutionEl.classList.remove('show'); }
+let autoplayToken = 0;
 function stopAutoplay() {
-  autoplaying = false;
+  autoplayToken++;
   $('btn-stop').style.display = 'none';
 }
 async function playSolution(moves) {
-  autoplayToken++;
-  const my = autoplayToken;
-  autoplaying = true;
+  const my = ++autoplayToken;
   shown = moves.slice(); playedCount = 0; renderSolution();
   $('btn-stop').style.display = '';
   for (const m of moves) {
@@ -511,7 +535,7 @@ async function playSolution(moves) {
     await performAsync(m, { duration: 150 });
     playedCount++; renderSolution();
   }
-  if (my === autoplayToken) { autoplaying = false; hideSolution(); }
+  if (my === autoplayToken) hideSolution();
   $('btn-stop').style.display = 'none';
 }
 
@@ -525,7 +549,7 @@ $('btn-solve').onclick = () => requestSolve((moves, ms) => {
   flashStatus(`解出 ${moves.length} 步（耗时 ${ms} ms），开始播放`);
   playSolution(moves);
 });
-$('btn-stop').onclick = () => { stopAutoplay(); autoplayToken++; flashStatus('已停止'); };
+$('btn-stop').onclick = () => { stopAutoplay(); flashStatus('已停止'); };
 
 /* ============================== 按钮与主循环 ============================== */
 $('btn-scramble').onclick = doScramble;
