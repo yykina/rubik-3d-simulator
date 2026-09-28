@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>三维魔方模拟器 · 3×3×3</title>
+<style>
+  :root {
+    --bg: #12141a; --panel: rgba(24, 27, 36, 0.88); --line: rgba(255,255,255,.10);
+    --text: #e8ebf2; --muted: #98a0b3; --accent: #57c7ff; --accent2: #7ee787;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(1200px 800px at 70% 10%, #1b2030 0%, var(--bg) 60%);
+    color: var(--text); overflow: hidden;
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; touch-action: none; }
+  .panel { position: absolute; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; backdrop-filter: blur(10px); box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+  #hud { top: 16px; left: 16px; padding: 14px 16px; min-width: 206px; }
+  #hud h1 { margin: 0 0 2px; font-size: 15px; }
+  #hud .sub { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  .stat { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; }
+  .stat + .stat { margin-top: 6px; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 18px; }
+  .stat .v.small { font-size: 13px; font-weight: 500; }
+  #timer.running { color: var(--accent2); }
+  #controls { bottom: 16px; left: 16px; right: 16px; padding: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button { appearance: none; border: 1px solid var(--line); background: #232838; color: var(--text);
+    padding: 9px 14px; border-radius: 10px; font: inherit; cursor: pointer; transition: .15s; }
+  button:hover:not(:disabled) { background: #2c3346; border-color: rgba(255,255,255,.22); }
+  button:disabled { opacity: .42; cursor: not-allowed; }
+  button.primary { background: #1d4e6b; border-color: #2f7ea8; }
+  button.primary:hover:not(:disabled) { background: #23607f; }
+  button.ghost { background: transparent; }
+  .sep { width: 1px; height: 24px; background: var(--line); margin: 0 4px; }
+  .spacer { flex: 1; }
+  #keymap { top: 16px; right: 16px; padding: 12px 14px; max-width: 310px; font-size: 12px; color: var(--muted); }
+  #keymap b { color: var(--text); font-weight: 600; }
+  #keymap kbd { background: #2a3040; border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 5px; font: 11px/1.4 ui-monospace, monospace; color: var(--text); }
+  #keymap .row { margin-top: 6px; }
+  #status { position: absolute; left: 50%; transform: translateX(-50%); bottom: 90px;
+    padding: 9px 16px; border-radius: 999px; font-size: 13px; opacity: 0; transition: opacity .25s;
+    background: var(--panel); border: 1px solid var(--line); pointer-events: none; white-space: nowrap; }
+  #status.show { opacity: 1; }
+  #toast { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    padding: 18px 22px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line);
+    text-align: center; display: none; min-width: 280px; }
+  #toast.show { display: block; }
+  #toast .bar { height: 6px; background: #2a3040; border-radius: 999px; overflow: hidden; margin-top: 12px; }
+  #toast .bar > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .2s; }
+  #toast .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  #solution { left: 50%; transform: translateX(-50%); top: 16px; padding: 10px 14px; max-width: 66vw;
+    font: 13px/1.8 ui-monospace, monospace; display: none; }
+  #solution.show { display: block; }
+  #solution .m { display: inline-block; padding: 1px 6px; margin: 2px; border-radius: 6px; background: #2a3040; }
+  #solution .m.done { color: var(--muted); background: #20242f; }
+  #solution .m.next { background: #1d4e6b; color: #fff; }
+  @media (max-width: 720px) { #keymap { display: none; } #hud { min-width: 0; padding: 10px 12px; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="hud" class="panel">
+  <h1>三维魔方模拟器</h1>
+  <div class="sub">3×3×3 · 拖动魔方转层 / 拖动背景转视角</div>
+  <div class="stat"><span class="k">计时</span><span class="v" id="timer">0.00</span></div>
+  <div class="stat"><span class="k">步数</span><span class="v" id="moves">0</span></div>
+  <div class="stat"><span class="k">状态</span><span class="v small" id="state">已还原</span></div>
+  <div class="stat"><span class="k">求解器</span><span class="v small" id="solver-state">加载中…</span></div>
+</div>
+
+<div id="keymap" class="panel">
+  <b>操作说明</b>
+  <div class="row"><kbd>拖动魔方</kbd> 转动对应层 · <kbd>拖动背景</kbd> 转视角 · <kbd>滚轮</kbd> 缩放</div>
+  <div class="row" style="margin-top:10px"><b>键盘</b>（按住 Shift = 逆时针）</div>
+  <div class="row"><kbd>U</kbd><kbd>D</kbd><kbd>L</kbd><kbd>R</kbd><kbd>F</kbd><kbd>B</kbd> 转层</div>
+  <div class="row"><kbd>X</kbd><kbd>Y</kbd><kbd>Z</kbd> 整体转 · <kbd>空格</kbd> 打乱 · <kbd>Ctrl+Z</kbd> 撤销 · <kbd>Esc</kbd> 停止求解</div>
+</div>
+
+<div id="solution" class="panel"></div>
+<div id="status"></div>
+
+<div id="toast" class="panel">
+  <div id="toast-text">正在准备求解器…</div>
+  <div class="bar"><i id="toast-bar"></i></div>
+  <div class="hint">首次使用需构建求解表（较慢），之后缓存到本地可秒级加载。构建期间仍可正常玩。</div>
+</div>
+
+<div id="controls" class="panel">
+  <button id="btn-scramble" class="primary">打乱</button>
+  <button id="btn-reset">还原</button>
+  <button id="btn-undo" class="ghost">撤销</button>
+  <div class="sep"></div>
+  <button id="btn-hint" disabled>提示</button>
+  <button id="btn-solve" disabled>自动求解</button>
+  <button id="btn-stop" class="ghost" style="display:none">停止</button>
+  <div class="spacer"></div>
+  <button id="btn-view" class="ghost">复位视角</button>
+</div>
+
+<!-- 内核（几何 / 状态 / 求解器），UMD：浏览器下挂到 window.CubeCore -->
+<script src="cube-core.js"></script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+const Core = window.CubeCore;
+const { CUBIES, TURN_BY_NAME, TURN_INVERSE } = Core;
+const $ = (id) => document.getElementById(id);
+
+/* ============================== 渲染基础 ============================== */
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+$('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 100);
+const HOME_CAM = new THREE.Vector3(4.8, 4.4, 6.4);
+camera.position.copy(HOME_CAM);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.12;
+controls.minDistance = 6.4;
+controls.maxDistance = 18;
+controls.enablePan = false;
+controls.rotateSpeed = 0.9;
+
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x1a1c22, 0.95));
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.3);
+keyLight.position.set(6, 9, 7);
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(1024, 1024);
+Object.assign(keyLight.shadow.camera, { near: 1, far: 34, left: -7, right: 7, top: 7, bottom: -7 });
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0x9fc4ff, 0.35);
+fillLight.position.set(-7, -4, -6);
+scene.add(fillLight);
+
+const ground = new THREE.Mesh(new THREE.CircleGeometry(26, 64), new THREE.ShadowMaterial({ opacity: 0.3 }));
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -2.4;
+ground.receiveShadow = true;
+scene.add(ground);
+
+/* ============================== 魔方外观 ============================== */
+const FACE_COLORS = { U: 0xf4f6fa, D: 0xffd23f, F: 0x2fbf71, B: 0x3d7bff, R: 0xff5a4d, L: 0xff9f1c };
+const faceOfNormal = (n) => (n[0] ? (n[0] > 0 ? 'R' : 'L') : n[1] ? (n[1] > 0 ? 'U' : 'D') : (n[2] > 0 ? 'F' : 'B'));
+const STICKER_QUAT = {
+  R: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2),
+  L: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2),
+  U: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2),
+  D: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2),
+  F: new THREE.Quaternion(),
+  B: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI),
+};
+
+const GAP = 0.045;                                  // 块间距（视觉）
+const SCALE = 1 - GAP;
+const cubeGroup = new THREE.Group();
+scene.add(cubeGroup);
+const bodyGeo = new RoundedBoxGeometry(0.95, 0.95, 0.95, 4, 0.09);
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.55, metalness: 0.15 });
+const stickerGeo = new THREE.PlaneGeometry(0.80, 0.80);
+
+const pieces = CUBIES.map((c, i) => {
+  const group = new THREE.Group();
+  group.position.fromArray(c.home.map((v) => v * SCALE));
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.castShadow = true;
+  body.receiveShadow = true;
+  group.add(body);
+  const stickers = [];
+  for (const n of c.normals) {
+    const face = faceOfNormal(n);
+    const mat = new THREE.MeshStandardMaterial({
+      color: FACE_COLORS[face], roughness: 0.4, metalness: 0.02, side: THREE.DoubleSide,
+      emissive: new THREE.Color(FACE_COLORS[face]).multiplyScalar(0.05),
+    });
+    const s = new THREE.Mesh(stickerGeo, mat);
+    s.userData = { piece: i, normal: new THREE.Vector3().fromArray(n), face };
+    s.quaternion.copy(STICKER_QUAT[face]);
+    s.position.set(n[0] * 0.4805, n[1] * 0.4805, n[2] * 0.4805);
+    group.add(s);
+    stickers.push(s);
+  }
+  cubeGroup.add(group);
+  return { group, stickers, home: c.home, index: i };
+});
+
+/* ============================== 逻辑状态 → 视觉 ============================== */
+const state = Core.solvedState();
+let history = [];
+let moveCount = 0;
+let timerStart = null, timerRunning = false;
+let scrambling = false, autoplayToken = 0;
+
+/** 内核的 3×3 列主序矩阵 → THREE 四元数（与内核的乘法顺序保持一致） */
+function toQuat(m) {
+  const t = new THREE.Matrix4().set(m[0], m[3], m[6], 0, m[1], m[4], m[7], 0, m[2], m[5], m[8], 0, 0, 0, 0, 1);
+  return new THREE.Quaternion().setFromRotationMatrix(t);
+}
+/** 逻辑状态 → 视觉（每步结束后调用） */
+function syncVisual() {
+  for (let slot = 0; slot < 26; slot++) {
+    const pc = pieces[state.perm[slot]];
+    pc.group.position.fromArray(CUBIES[slot].home.map((v) => v * SCALE));
+    pc.group.quaternion.copy(toQuat(state.ori[slot]));
+  }
+}
+const isAffectedSlot = (slot, turn) => CUBIES[slot].home[turn.axis] === turn.layer;
+const slotOfPiece = (pieceIndex) => state.perm.indexOf(pieceIndex);
+
+/* ============================== 转动执行（带动画） ============================== */
+let anim = null;                       // { tick }
+const queue = [];                      // 待执行 [{move, opts}]
+
+/**
+ * 执行一个动作。
+ * opts: { duration, fast, silent, onDone }
+ * silent = true 时不增加步数、不计入历史（撤销/整体转用）
+ */
+function perform(move, opts = {}) {
+  if (anim) { queue.push({ move, opts }); return; }
+  const turn = TURN_BY_NAME.get(move);
+  if (!turn) return;
+  const axis = new THREE.Vector3(turn.axis === 0 ? 1 : 0, turn.axis === 1 ? 1 : 0, turn.axis === 2 ? 1 : 0);
+
+  // 取受影响的小块，并记录动画起点的位置/朝向
+  const moving = [];
+  for (let slot = 0; slot < 26; slot++) {
+    if (!isAffectedSlot(slot, turn)) continue;
+    const pc = pieces[state.perm[slot]];
+    moving.push({
+      pc,
+      from: new THREE.Vector3().fromArray(CUBIES[slot].home.map((v) => v * SCALE)),
+      quat: toQuat(state.ori[slot]),
+    });
+  }
+  const total = (turn.deg * Math.PI) / 180;
+  const duration = opts.duration ?? (opts.fast ? 110 : 200);
+  const t0 = performance.now();
+
+  anim = {
+    tick(now) {
+      const p = duration <= 0 ? 1 : Math.min(1, (now - t0) / duration);
+      const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;   // easeInOutQuad
+      const q = new THREE.Quaternion().setFromAxisAngle(axis, total * e);
+      for (const m of moving) {
+        m.pc.group.position.copy(m.from).applyQuaternion(q);
+        m.pc.group.quaternion.copy(q).multiply(m.quat);
+      }
+      if (p >= 1) {
+        anim = null;
+        Core.applyTurn(state, move);
+        syncVisual();
+        if (!opts.silent) {
+          if (!scrambling) history.push(move);
+          moveCount++;
+          $('moves').textContent = String(moveCount);
+          startTimer();
+          refreshSolved();
+        }
+        if (opts.onDone) opts.onDone();
+        if (queue.length) { const n = queue.shift(); perform(n.move, n.opts); }
+      }
+    },
+  };
+}
+function performAsync(move, opts = {}) {
+  return new Promise((resolve) => perform(move, { ...opts, onDone: resolve }));
+}
+
+/* ============================== 计时 / 状态 ============================== */
+const timerEl = $('timer'), stateEl = $('state');
+function startTimer() {
+  if (timerRunning) return;
+  timerRunning = true; timerStart = performance.now();
+  timerEl.classList.add('running');
+}
+function stopTimer() { timerRunning = false; timerEl.classList.remove('running'); }
+function resetTimer() { stopTimer(); timerStart = null; timerEl.textContent = '0.00'; }
+function refreshSolved() {
+  const solved = Core.isSolved(state);
+  stateEl.textContent = solved ? (moveCount ? '已还原 🎉' : '已还原') : '打乱中';
+  stateEl.style.color = solved && moveCount ? '#7ee787' : '';
+  if (solved && timerRunning) { stopTimer(); flashStatus(`完成！${moveCount} 步，用时 ${timerEl.textContent} 秒`); }
+}
+function flashStatus(text) {
+  const el = $('status');
+  el.textContent = text; el.classList.add('show');
+  clearTimeout(flashStatus._t);
+  flashStatus._t = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+/* ============================== 打乱 / 还原 / 撤销 ============================== */
+function randomScramble(n = 25) {
+  const faces = ['U', 'D', 'L', 'R', 'F', 'B'], sufs = ['', '2', "'"];
+  const out = []; let last = '';
+  while (out.length < n) {
+    const f = faces[(Math.random() * 6) | 0];
+    if (f === last) continue;
+    last = f; out.push(f + sufs[(Math.random() * 3) | 0]);
+  }
+  return out;
+}
+async function doScramble() {
+  if (scrambling) return;
+  stopAutoplay();
+  while (anim || queue.length) await new Promise((r) => setTimeout(r, 30));
+  scrambling = true;
+  history = []; moveCount = 0; $('moves').textContent = '0';
+  resetTimer(); hideSolution();
+  for (const m of randomScramble(25)) await performAsync(m, { fast: true, duration: 70 });
+  scrambling = false;
+  refreshSolved();
+  startTimer();                               // 打乱后开始计时
+  flashStatus('已打乱 · 计时开始');
+}
+function undo() {
+  if (anim || !history.length) return;
+  const last = history.pop();
+  moveCount = Math.max(0, moveCount - 1);
+  $('moves').textContent = String(moveCount);
+  perform(TURN_INVERSE.get(last), { silent: true, fast: true });
+}
+function resetCube() {
+  stopAutoplay();
+  queue.length = 0;
+  const fresh = Core.solvedState();
+  for (let i = 0; i < 26; i++) { state.perm[i] = fresh.perm[i]; state.ori[i] = fresh.ori[i]; }
+  history = []; moveCount = 0; $('moves').textContent = '0';
+  resetTimer(); hideSolution(); syncVisual(); refreshSolved();
+  flashStatus('已还原');
+}
+
+/* ============================== 鼠标/触摸交互 ============================== */
+const raycaster = new THREE.Raycaster();
+const pointerNDC = new THREE.Vector2();
+let drag = null;
+
+function pickSticker(clientX, clientY) {
+  pointerNDC.x = (clientX / innerWidth) * 2 - 1;
+  pointerNDC.y = -(clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointerNDC, camera);
+  const hits = raycaster.intersectObjects(pieces.flatMap((p) => p.stickers), false);
+  if (!hits.length) return null;
+  const hit = hits[0];
+  const ud = hit.object.userData;
+  const piece = pieces[ud.piece];
+  const normal = ud.normal.clone().applyQuaternion(piece.group.quaternion).normalize();
+  return { pieceIndex: ud.piece, face: ud.face, point: hit.point.clone(), normal };
+}
+
+renderer.domElement.addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0) { drag = null; return; }
+  const hit = pickSticker(ev.clientX, ev.clientY);
+  drag = { x0: ev.clientX, y0: ev.clientY, hit, committed: false };
+});
+
+renderer.domElement.addEventListener('pointermove', (ev) => {
+  if (!drag || !drag.hit || drag.committed) return;
+  const dx = ev.clientX - drag.x0, dy = ev.clientY - drag.y0;
+  if (Math.hypot(dx, dy) < 10) return;
+  const move = turnFromDrag(drag.hit, dx, dy);
+  drag.committed = true;
+  if (move) perform(move);
+});
+
+addEventListener('pointerup', () => { drag = null; });
+
+/**
+ * 由「贴纸法向 n + 屏幕拖动方向」推出动作。
+ * 设拖动方向对应的世界方向为 d，则转动轴 = n × d；
+ * 取该轴的最大分量作为转动轴，符号决定正/反转，层则由被拖小块的当前位置决定。
+ */
+function turnFromDrag(hit, dxPx, dyPx) {
+  const n = hit.normal.clone();
+  let right = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), n);
+  if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+  right.normalize();
+  const up = new THREE.Vector3().crossVectors(n, right).normalize();
+  const d = right.clone().multiplyScalar(dxPx).add(up.clone().multiplyScalar(-dyPx)).normalize();
+  const axisVec = new THREE.Vector3().crossVectors(n, d);
+  const comps = [Math.abs(axisVec.x), Math.abs(axisVec.y), Math.abs(axisVec.z)];
+  const axis = comps.indexOf(Math.max(...comps));
+  if (comps[axis] < 0.3) return null;
+  const sign = [axisVec.x, axisVec.y, axisVec.z][axis] > 0 ? 1 : -1;
+  const slot = slotOfPiece(hit.pieceIndex);
+  const layer = CUBIES[slot].home[axis];
+  for (const t of Core.TURNS) {
+    if (t.axis !== axis || t.layer !== layer) continue;
+    if (Math.sign(t.deg) === sign) return t.name;
+  }
+  return null;
+}
+
+/* ============================== 键盘 ============================== */
+addEventListener('keydown', (ev) => {
+  if (ev.ctrlKey || ev.metaKey) {
+    if (ev.key.toLowerCase() === 'z') { ev.preventDefault(); undo(); }
+    return;
+  }
+  const k = ev.key.toUpperCase();
+  if (k === ' ') { ev.preventDefault(); doScramble(); return; }
+  if (k === 'ESCAPE') { stopAutoplay(); return; }
+  if ('UDLRFB'.includes(k)) { ev.preventDefault(); perform(ev.shiftKey ? k + "'" : k); return; }
+  if ('XYZ'.includes(k)) {                    // 整体转：等价于两层同向转
+    ev.preventDefault();
+    const base = { X: ['R', "L'"], Y: ['U', "D'"], Z: ['F', "B'"] }[k];
+    const moves = (ev.shiftKey ? base.map((m) => TURN_INVERSE.get(m)) : base);
+    for (const m of moves) perform(m, { silent: true, fast: true });
+  }
+});
+
+/* ============================== 求解器（Worker） ============================== */
+let worker = null, solverReady = false, pending = null, seq = 0, autoplaying = false;
+const solverStateEl = $('solver-state');
+const toastEl = $('toast'), toastText = $('toast-text'), toastBar = $('toast-bar');
+
+(function initWorker() {
+  try { worker = new Worker('solver-worker.js'); }
+  catch (e) { solverStateEl.textContent = '不可用'; return; }
+  worker.onmessage = (ev) => {
+    const m = ev.data || {};
+    if (m.type === 'progress') {
+      toastEl.classList.add('show');
+      toastText.textContent = `${m.label} … ${m.pct}%`;
+      toastBar.style.width = m.pct + '%';
+    } else if (m.type === 'ready') {
+      solverReady = true;
+      solverStateEl.textContent = m.cached ? '就绪（本地缓存）' : '就绪';
+      toastEl.classList.remove('show');
+      $('btn-hint').disabled = false;
+      $('btn-solve').disabled = false;
+    } else if (m.type === 'solution') {
+      const cb = pending && pending.id === m.id ? pending.cb : null;
+      pending = null;
+      setSolving(false);
+      if (cb) cb(m.moves, m.ms);
+    } else if (m.type === 'error') {
+      pending = null; setSolving(false);
+      flashStatus('求解失败：' + m.message);
+    }
+  };
+  worker.onerror = () => { solverStateEl.textContent = '不可用'; toastEl.classList.remove('show'); };
+})();
+
+function setSolving(on) {
+  $('btn-stop').style.display = on ? '' : 'none';
+  $('btn-solve').disabled = on || !solverReady;
+  $('btn-hint').disabled = on || !solverReady;
+}
+function requestSolve(cb) {
+  if (!solverReady || !worker) { flashStatus('求解器还在准备中，请稍候'); return; }
+  if (anim || queue.length) { flashStatus('请等当前动画结束'); return; }
+  const id = ++seq;
+  pending = { id, cb };
+  setSolving(true);
+  worker.postMessage({
+    type: 'solve', id,
+    perm: state.perm.slice(),
+    ori: state.ori.map((m) => m.slice()),
+  });
+}
+
+/* 解序列展示与自动播放 */
+const solutionEl = $('solution');
+let shown = [], playedCount = 0;
+function renderSolution() {
+  if (!shown.length) { solutionEl.classList.remove('show'); return; }
+  solutionEl.classList.add('show');
+  solutionEl.innerHTML = shown
+    .map((m, i) => `<span class="m ${i < playedCount ? 'done' : i === playedCount ? 'next' : ''}">${m}</span>`)
+    .join('');
+}
+function hideSolution() { shown = []; solutionEl.classList.remove('show'); }
+function stopAutoplay() {
+  autoplaying = false;
+  $('btn-stop').style.display = 'none';
+}
+async function playSolution(moves) {
+  autoplayToken++;
+  const my = autoplayToken;
+  autoplaying = true;
+  shown = moves.slice(); playedCount = 0; renderSolution();
+  $('btn-stop').style.display = '';
+  for (const m of moves) {
+    if (my !== autoplayToken) break;
+    await performAsync(m, { duration: 150 });
+    playedCount++; renderSolution();
+  }
+  if (my === autoplayToken) { autoplaying = false; hideSolution(); }
+  $('btn-stop').style.display = 'none';
+}
+
+$('btn-hint').onclick = () => requestSolve((moves) => {
+  if (!moves.length) { flashStatus('已经还原'); return; }
+  shown = moves.slice(); playedCount = 0; renderSolution();
+  flashStatus('下一步：' + moves[0] + `（整段 ${moves.length} 步）`);
+});
+$('btn-solve').onclick = () => requestSolve((moves, ms) => {
+  if (!moves.length) { flashStatus('已经还原'); return; }
+  flashStatus(`解出 ${moves.length} 步（耗时 ${ms} ms），开始播放`);
+  playSolution(moves);
+});
+$('btn-stop').onclick = () => { stopAutoplay(); autoplayToken++; flashStatus('已停止'); };
+
+/* ============================== 按钮与主循环 ============================== */
+$('btn-scramble').onclick = doScramble;
+$('btn-reset').onclick = resetCube;
+$('btn-undo').onclick = undo;
+$('btn-view').onclick = () => {
+  const from = camera.position.clone();
+  const t0 = performance.now();
+  const step = (now) => {
+    const p = Math.min(1, (now - t0) / 420);
+    const e = 1 - Math.pow(1 - p, 3);
+    camera.position.lerpVectors(from, HOME_CAM, e);
+    controls.target.set(0, 0, 0);
+    controls.update();
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+};
+
+syncVisual();
+refreshSolved();
+requestAnimationFrame(function loop(now) {
+  requestAnimationFrame(loop);
+  if (anim) anim.tick(now);
+  if (timerRunning) timerEl.textContent = ((now - timerStart) / 1000).toFixed(2);
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// 调试入口（方便在控制台里检查）
+window.__cube = { Core, state, pieces, perform, doScramble, resetCube, requestSolve };
+</script>
+</body>
+</html>
