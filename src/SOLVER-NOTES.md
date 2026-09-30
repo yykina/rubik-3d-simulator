@@ -83,3 +83,40 @@ IDA*，但**直接携带真实状态**（每层 clone），启发值取坐标剪
     并以 `tools/verify-solver-core.js` 作为验收门槛。
 - **验收门槛**：`node tools/verify-solver-core.js` 必须达到 100% 通过
   （独立面片校验 0 错位），才允许在界面上重新启用求解按钮。
+
+---
+
+## 2026-09-30（续）迁移开源方案 min2phase 的进展与卡点
+
+按审查建议，已把成熟的 **min2phase**（MIT，cs0x7f）自包含的低层求解器移植到
+`vendor/min2phase.port.js`（只依赖 `{cp,co,ep,eo}` 四组数组，不依赖 kpuzzle/alg）。
+
+### 已完成
+- 移植后可正常运行，**并修复了移植过程中引入的 4 个 bug**：
+  1. `EPermR2S` 的填充循环漏了一行赋值（`EPermR2S[idx2] = count << 4 | s`），
+     导致所有棱块置换的对称索引都退化为 0，`MEPermPrun` 只能扩展 1 个状态、BFS 永不收敛；
+  2. `depth` / `done` 未在每个剪枝表 BFS 前复位；
+  3. 局部变量 `twist0/flip0` 与模块级常量数组 `twist/flip` 同名（`const` 赋值报错）；
+  4. 若干 `const sym` 在循环里被 `>>=` 修改。
+- 修复后 **初始化 400~550 ms**、单次求解 **~3 ms**，剪枝表全部填满
+  （`MEPermPrun`/`MCPermPrun` 均 `done = 66432`）。
+
+### 当前卡点：朝向约定未对齐
+- 已确认的差异：**置换互为逆排列** —— 本项目 `cp[piece] = slot`，
+  min2phase 是 `cp[slot] = piece`（已用 min2phase 自己的 `moveCube` 对 R 做过验证）。
+- **朝向仍对不上**：以 min2phase 自己的 `moveCube[3]`（R）为基准，
+  它给出 `eo = 全 0`，而本项目的 `eo` 给出 4 个 1；F/B 两个动作两边一致，R/L 不一致。
+  推测 min2phase 的 EO 采用的是「把该块送回原位后，U/D 贴纸是否仍指向原位轴」这一定义，
+  但按此实现的候选规则与它的 `co`/`eo` 仍不能逐项对齐（已尝试参数化规则穷举与多种重排）。
+
+### 下一步（任一即可收敛）
+1. 用 min2phase 自身当「神谕」：从还原态出发按它的 `moveCube` 做 BFS，
+   对每个 (块, 槽位, 朝向) 记录它的 `eo`/`co` 取值，直接建一张换算表，
+   再用 `tools/verify-solver-core.js` 做验收（必须 100% 通过）。
+2. 或换用其它实现（如 `cube-solver` / `kociemba` 的 wasm 版本），
+   以「回放后 `misplacedStickers() === 0`」为唯一验收标准。
+3. 自研路线：采用物理约束版 `flip`，并按本文档开头「单遍 BFS、坐标→代表状态」的正确算法
+   重建阶段一距离表。
+
+**验收门槛（务必遵守）**：`node tools/verify-solver-core.js` 全绿之前，
+不要在界面上重新启用「提示 / 自动求解」。

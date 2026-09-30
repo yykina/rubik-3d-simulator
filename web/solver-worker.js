@@ -13,7 +13,7 @@
  */
 importScripts('cube-core.js');
 
-const MAGIC = 'CB08';
+const MAGIC = 'CB09';
 const N = [2187 * 2048, 24 * 40320, 24 * 40320];
 const TOTAL = N.reduce((a, b) => a + b, 0);
 const DB_NAME = 'rubik-solver';

@@ -518,8 +518,15 @@
      * 该槽位上棱块的 U/D 贴纸是否被转到侧面。
      */
     function edgeFlip(st, slot) {
-      const m = unpack(st.ori[POS_OF_EDGE_SLOT[slot]]);
-      return m[4] !== 0 ? 0 : 1;
+      const pos = POS_OF_EDGE_SLOT[slot];
+      const m = unpack(st.ori[pos]);
+      const up = [m[1], m[4], m[7]];             // 该块 U/D 贴纸的世界方向
+      const home = CUBIES[pos].home;
+      // U/D 面槽位（home 的 y 非零）：U/D 贴纸应指向 ±y
+      if (home[1] !== 0) return up[1] !== 0 ? 0 : 1;
+      // E 层槽位：U/D 贴纸应指向该槽位的层轴（与棱长轴垂直的那个方向）
+      const ax = home[0] !== 0 ? 0 : 2;
+      return up[ax] !== 0 ? 0 : 1;
     }
     function twistOf(st) {
       let idx = 0;

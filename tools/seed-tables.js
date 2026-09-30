@@ -20,7 +20,7 @@ module.exports = function tableSeeder() {
     req.onsuccess = () => {
       const db = req.result;
       const tx = db.transaction('tables', 'readwrite');
-      tx.objectStore('tables').put({ total: N.reduce((a, b) => a + b, 0), p1: parts[0], sc: parts[1], se: parts[2] }, 'CB08');
+      tx.objectStore('tables').put({ total: N.reduce((a, b) => a + b, 0), p1: parts[0], sc: parts[1], se: parts[2] }, 'CB09');
       tx.oncomplete = () => { window.__seeded = true; };
     };
   })();`;
