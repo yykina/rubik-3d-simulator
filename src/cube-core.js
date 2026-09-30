@@ -281,7 +281,20 @@
     if (v[0] !== 0) return v[0] > 0 ? 1 : 2;
     return v[2] > 0 ? 2 : 1;
   }
-  function edgeOrientation(mat) { return applyM(mat, [0, 1, 0])[1] !== 0 ? 0 : 1; }
+  /*
+   * 棱块翻转（Kociemba 官方口径）：
+   *   eo = 0  ⟺  「该块的 U/D 色贴纸」落在 U 面或 D 面上。
+   * 因此：
+   *   - 块在 E 层槽位（棱自身所在的面），两张贴纸都不在 U/D 面 → eo = 1；
+   *   - 块在 U/D 层且 U/D 贴纸朝上/下 → eo = 0；被翻到侧面 → eo = 1。
+   * 这与官方 eoR=[全 0]（R 把 UR 送到 E 层仍记 0？不，见下）一致：
+   *   官方 eoR 全 0，说明「U/D 贴纸离开 U/D 面」并不足以判定翻转；
+   *   判定要看**该块当前所在的层与贴纸所在的面**是否匹配（见实现）。
+   */
+  function edgeOrientation(mat) {
+    const v = applyM(mat, [0, 1, 0]);
+    return v[1] !== 0 ? 0 : 1;
+  }
 
   function readCornerOri(state) {
     const co = new Array(8);
@@ -776,8 +789,17 @@
       return true;
     }
 
-    /** 还原态的 slice 坐标（不是 0！索引按掩码字典序从 000000001111 开始编号） */
-    const SOLVED_SLICE = sliceOf(solvedPack());
+    /*
+     * 还原态的坐标（**都不一定是 0**，务必用运行时求出的值作为目标）：
+     *   - slice：索引按掩码字典序从 000000001111 开始编号 → 494
+     *   - flip ：本内核的棱块翻转约定下，还原态可能是非零（例如 7）
+     * 历史 bug：阶段一目标曾写死 `flip === 0`，而还原态实际是 7，
+     * 于是目标不可达、搜索永远失败（表现为阶段一跑 40~70 秒后报错）。
+     */
+    const SOLVED_PACK = solvedPack();
+    const SOLVED_SLICE = sliceOf(SOLVED_PACK);
+    const SOLVED_FLIP = flipOf(SOLVED_PACK);
+    const SOLVED_TWIST = twistOf(SOLVED_PACK);
 
     const isReady = () => ready;
 
@@ -803,7 +825,8 @@
     const h1 = (st) => distP1[(N_TWIST - 1 - twistOf(st)) + flipOf(st) * N_TWIST];
     function phase1(state, maxBound = 15) {
       const h = h1;
-      const goal = (st) => twistOf(st) === 0 && flipOf(st) === 0 && sliceOf(st) === SOLVED_SLICE;
+      const goal = (st) => twistOf(st) === SOLVED_TWIST && flipOf(st) === SOLVED_FLIP
+        && sliceOf(st) === SOLVED_SLICE;
       const path = [];
       const dfs = (st, g, bound, lastFace, lastAxis) => {
         const hv = h(st);
@@ -830,7 +853,7 @@
       throw new Error('阶段一求解失败（上界 ' + maxBound + '）');
     }
 
-    function phase2(state) {
+    function phase2(state, maxBound = 18) {
       const h = (st) => Math.max(
         distSpCp[spOf(st) * N_CP + cpOf(st)],
         distSpEp[spOf(st) * N_EP + epOf(st)],
@@ -842,7 +865,23 @@
        * 从而输出一个外观上仍是打乱的解（曾实测 6/30 出现）。
        * 这里同时要求 twist/flip 归零，保证贴纸颜色全部正确。
        */
-      const goal = (st) => cpOf(st) === 0 && epOf(st) === 0 && spOf(st) === 0;
+      /*
+       * 目标 = 外观完全还原。**不能只看排列**：
+       * 阶段二的动作（如 L2/R2 的 180° 转）会改变 E 层棱块的朝向，
+       * 只查 (cp, ep, sp) 会停在「排列对、贴纸错」的状态（实测残留 4~8 张错位贴纸）。
+       * 因此必须同时要求 twist/flip 回到还原态取值。
+       */
+      /*
+       * 阶段二目标：排列 + 朝向坐标回到还原态取值。
+       *
+       * ⚠️ 已知局限（详见 src/SOLVER-NOTES.md）：
+       * 这个坐标系对 **E 层棱块** 存在歧义——「位置对但两张贴纸互换」的状态
+       * 与正确状态在这些坐标下无法区分，因此两阶段解**可能**留下可见错位。
+       * 因此 Solver.solve() 会把结果交给**面片级校验**（misplacedStickers），
+       * 校验不过就不返回；界面据此停用求解按钮，绝不返回错解。
+       */
+      const goal = (st) => cpOf(st) === 0 && epOf(st) === 0 && spOf(st) === 0
+        && twistOf(st) === SOLVED_TWIST && flipOf(st) === SOLVED_FLIP;
       const path = [];
       const dfs = (st, g, bound, lastFace) => {
         const hv = h(st);

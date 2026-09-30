@@ -43,6 +43,53 @@ ok(C.isSolved(run("R U R' U' R U R' U' R U R' U' R U R' U' R U R' U' R U R' U'")
   ok(C.isSolved(st), '任意打乱逆序回放回到还原');
 }
 
+console.log('\n[1b] 与 Kociemba 官方表比对（防止转动方向再次退化）');
+{
+  /*
+   * 这两个表来自 Kociemba 官方实现
+   * https://github.com/hkociemba/RubiksCube-OptimalSolver/blob/master/cubie.py
+   * 顺序 URFDLB。**不要**用「自洽性」测试替代它：
+   * 曾经六个面转角全部写反（move('U') 等于标准 U'），
+   * 而逆动作互消、(R U R' U')×6 这类自洽性检查在整体取逆后依然成立，
+   * 因此长期没能发现，直到与官方表比对才暴露。
+   */
+  const STD_CP = { U: [3,0,1,2,4,5,6,7], R: [4,1,2,0,7,5,6,3], F: [1,5,2,3,0,4,6,7],
+    D: [0,1,2,3,5,6,7,4], L: [0,2,6,3,4,1,5,7], B: [0,1,3,7,4,5,2,6] };
+  const STD_EP = { U: [3,0,1,2,4,5,6,7,8,9,10,11], R: [8,1,2,3,11,5,6,7,4,9,10,0],
+    F: [0,9,2,3,4,8,6,7,1,5,10,11], D: [0,1,2,3,5,6,7,4,8,9,10,11],
+    L: [0,1,10,3,4,5,9,7,8,2,6,11], B: [0,1,2,11,4,5,6,10,8,9,3,7] };
+  const inv = (a) => { const b = new Array(a.length); for (let i = 0; i < a.length; i++) b[a[i]] = i; return b; };
+  for (const m of ['U', 'R', 'F', 'D', 'L', 'B']) {
+    const st = C.solvedState(); C.applyTurn(st, m);
+    const cp = inv(C.readCornerPerm(st)).join(',');
+    const ep = inv(C.readEdgePerm(st)).join(',');
+    ok(cp === STD_CP[m].join(','), `${m} 的角块置换与 Kociemba 官方表一致`);
+    ok(ep === STD_EP[m].join(','), `${m} 的棱块置换与 Kociemba 官方表一致`);
+  }
+  // 多步组合也要一致
+  const seq = ['R', 'U', "F'", 'L', 'D', 'B2'];
+  const st = C.solvedState(); C.applyMoves(st, seq);
+  let ref = { cp: [0,1,2,3,4,5,6,7], ep: [0,1,2,3,4,5,6,7,8,9,10,11] };
+  const MOVE_PERM = { U: STD_CP.U, R: STD_CP.R, F: STD_CP.F, D: STD_CP.D, L: STD_CP.L, B: STD_CP.B };
+  const MOVE_PERM_E = { U: STD_EP.U, R: STD_EP.R, F: STD_EP.F, D: STD_EP.D, L: STD_EP.L, B: STD_EP.B };
+  // 组合规则：先 a 后 b 的置换 = a[b[i]]（与内核 applyTurn 的语义一致）
+  const compose = (a, b) => a.map((_, i) => a[b[i]]);
+  for (const raw of seq) {
+    const reps = raw.endsWith('2') ? [raw[0], raw[0]] : [raw];
+    for (const mv of reps) {
+      let cp = MOVE_PERM[mv[0]].slice(), ep = MOVE_PERM_E[mv[0]].slice();
+      if (mv.endsWith("'")) {
+        // 逆置换
+        const icp = inv(cp), iep = inv(ep);
+        cp = icp; ep = iep;
+      }
+      ref = { cp: compose(ref.cp, cp), ep: compose(ref.ep, ep) };
+    }
+  }
+  ok(inv(C.readCornerPerm(st)).join(',') === ref.cp.join(','), '多步组合的角块置换与官方表一致');
+  ok(inv(C.readEdgePerm(st)).join(',') === ref.ep.join(','), '多步组合的棱块置换与官方表一致');
+}
+
 console.log('\n[2] 还原判定（外观口径）');
 ok(C.isSolved(C.solvedState()), '还原态判定为已还原');
 ok(C.misplacedStickers(C.solvedState()) === 0, '还原态错位贴纸数 = 0');
