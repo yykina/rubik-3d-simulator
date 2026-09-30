@@ -187,3 +187,48 @@ IDA*，但**直接携带真实状态**（每层 clone），启发值取坐标剪
    - 也可以只让**界面侧**维护一个 cubejs 影子状态，专门用于求解，内核保持不变。
 
 **验收门槛不变**：`node tools/verify-solver-core.js` 全绿（`misplacedStickers() === 0`）才启用按钮。
+
+---
+
+## 2026-09-30（重大发现）本轮真正找到了求解器全盘失败的根因
+
+### 根因：内核的转动方向与标准记号不一致（历史遗留）
+与 **Kociemba 官方实现**（[hkociemba/RubiksCube-OptimalSolver](https://github.com/hkociemba/RubiksCube-OptimalSolver/blob/master/cubie.py)）
+的 `cp/co/ep/eo` 表逐项比对后发现：本内核最初的六个面转角**全部写反了**，
+即 `move("U")` 实际等于标准的 `U'`（R = R'，依此类推）。
+
+**为什么长期没被发现**：所有自检都只验证「自洽性」——
+逆动作互消、`(R U R' U')×6 == 恒等`、状态机一致性——
+这些性质在整体取逆后**依然成立**，于是错误被完整掩盖。
+这也是此前 min2phase / cube-solver / cubejs 三个标准实现全部对不上的**真正原因**
+（而不是之前以为的「朝向编码」问题）。
+
+### 已修正并验证
+- 修正了 `FACE_DEF` 的方向，并按官方表验证：
+  **六个基本动作的 `cp`（角块置换）与 `ep`（棱块置换）已与官方完全一致** ✅
+- 过程中确认了官方表（可直接抄用，避免再猜）：
+  ```
+  cpU=[UBR,URF,UFL,ULB,DFR,DLF,DBL,DRB]  cpR=[DFR,UFL,ULB,URF,DRB,DLF,DBL,UBR]
+  cpF=[UFL,DLF,ULB,UBR,URF,DFR,DBL,DRB]  cpL=[URF,ULB,DBL,UBR,DFR,UFL,DLF,DRB]
+  cpB=[URF,UFL,UBR,DRB,DFR,DLF,ULB,DBL]  cpD=[URF,UFL,ULB,UBR,DLF,DBL,DRB,DFR]
+  coR=[2,0,0,1,1,0,0,2]  coF=[1,2,0,0,2,1,0,0]  coL=[0,1,2,0,0,2,1,0]  coB=[0,0,1,2,0,0,2,1]
+  eoF=[0,1,0,0,0,1,0,0,1,1,0,0]  eoB=[0,0,0,1,0,0,0,1,0,0,1,1]（其余 eo 全 0）
+  ```
+
+### 尚未收敛的一步（下一轮从这里开始，工作量很小）
+- `co`/`eo` 的**符号口径**还没对齐：本内核的 `cornerOrientation`/`edgeOrientation`
+  是「U/D 贴纸是否在 U/D 面」的直观定义，而官方 `co` 还取决于贴纸落在哪个侧面
+  （例如 R 之后 URF 槽位官方给 `co=2`，本内核给 1）。
+- **不要再用「试符号」的办法**。正确做法（已想清楚）：
+  1. 直接用官方的 facelet 表（`cornerFacelet` / `edgeFacelet` / `cornerColor` / `edgeColor`，
+     见上面链接的 `defs.py`）建立「54 面片字符串 ↔ 内核状态」的双向映射；
+  2. 用 `Cube.fromString`（cubejs，已在 `vendor/cubejs/`，自身完全自洽）
+     或官方 `CubieCube` 的 `toFacelet/fromFacelet` 作为**唯一真值**；
+  3. 校验门槛：对 18 个基本动作，`cp/co/ep/eo` **四项**全部与官方一致；
+     再跑 `npm run verify:solver`（独立面片校验 0 错位）。
+- 完成后即可直接用 cubejs 求解（`Cube.fromString(...).solve()`），无需自研搜索。
+
+### 给后续的提醒
+- 自洽性测试（逆动作、循环恒等）**不能**验证转动方向是否符合标准记号；
+  必须与外部权威表比对。建议在 `src/test-core.js` 里**永久保留**一条
+  「与官方 cp 表比对」的断言，防止再次退化。
