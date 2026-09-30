@@ -168,22 +168,81 @@
   }
   function applyMoves(state, moves) { for (const m of moves) applyTurn(state, m); return state; }
 
-  /**
-   * 是否已还原。
-   * 注意：面心块（center）与 E 层棱块（FR/FL/BL/BR）即使朝向不同也看不出差别，
-   * 因此只要求「位置归位」，朝向只在 U/D 面与侧面的贴纸才需要检查。
-   * 角块与棱块都要检查朝向。
+  /*
+   * 「是否已还原」= 外观上还原（见 isSolvedByAppearance）。
+   * 注意不要退化成「所有朝向矩阵都是单位矩阵」：E 层棱块（FR/FL/BL/BR）与面心块
+   * 存在**不可见的朝向冗余**，例如 R2 之后外观完全还原，但它们的朝向矩阵并非单位矩阵。
+   * 用矩阵判等会把这种「看起来已还原」的状态误判成未还原。
    */
-  function isSolved(state) {
-    for (let i = 0; i < 26; i++) {
-      if (state.perm[i] !== i) return false;
-      const c = CUBIES[i];
-      if (c.kind === 'center') continue;                 // 面心朝向不可见
-      if (c.kind === 'edge' && SLICE_EDGES.indexOf(c.piece) >= 0) continue; // E 层棱块朝向不可见
-      const m = state.ori[i];
-      for (let k = 0; k < 9; k++) if (m[k] !== IDENTITY[k]) return false;
+  function isSolved(state) { return isSolvedByAppearance(state); }
+
+  /** 方向向量 → 面名（渲染层用同一套配色编号：R L U D F B） */
+  const FACE_OF_DIR = (v) => (v[0] ? (v[0] > 0 ? 'R' : 'L') : v[1] ? (v[1] > 0 ? 'U' : 'D') : (v[2] > 0 ? 'F' : 'B'));
+
+  /**
+   * 「外观还原」判定：只看玩家能看到的东西，不看内部朝向表示。
+   *
+   * 规则：每块的位置必须归位；对每张贴纸而言，
+   *   - 它必须朝向该槽位的外表面（不能指向内部）；
+   *   - 它指向的那个面，必须正好是它自己所属的颜色面。
+   * 等价的说法是：每个外表面上的 9 张贴纸颜色一致，且每块都在原位。
+   * 这样 E 层棱块/面心块的不可见朝向冗余会被自然忽略。
+   */
+  function isSolvedByAppearance(state) {
+    for (let slot = 0; slot < 26; slot++) {
+      if (state.perm[slot] !== slot) return false;          // 位置必须归位
+      const home = CUBIES[slot].home;
+      const piece = CUBIES[slot];                            // 归位后自身即该块
+      for (const n of piece.normals) {
+        const w = applyM(state.ori[slot], n);
+        const dir = w.findIndex((v) => v !== 0);
+        if (dir < 0) return false;
+        // 贴纸最终指向的面，必须与它所属的颜色面相同
+        const target = [0, 0, 0];
+        target[dir] = w[dir] > 0 ? 1 : -1;
+        if (FACE_OF_DIR(target) !== FACE_OF_DIR(n)) return false;
+        // 也要保证它指向的是外表面而不是内部
+        if (home[dir] === 0) return false;
+      }
     }
     return true;
+  }
+
+  /**
+   * 面片采样：返回 6 个面各自的可见贴纸颜色数组（用于独立校验与「距还原程度」评估）。
+   * 每个面恰好 9 张；颜色用 FACE_OF_DIR 的面名表示。
+   */
+  function faceletsOf(state) {
+    const faces = { U: [], R: [], F: [], D: [], L: [], B: [] };
+    for (let slot = 0; slot < 26; slot++) {
+      const home = CUBIES[slot].home;
+      const piece = CUBIES[state.perm[slot]];
+      for (const n of piece.normals) {
+        const w = applyM(state.ori[slot], n);
+        const dir = w.findIndex((v) => v !== 0);
+        if (dir < 0 || home[dir] === 0) continue;          // 朝内不可见
+        const faceDir = [0, 0, 0];
+        faceDir[dir] = home[dir];
+        faces[FACE_OF_DIR(faceDir)].push(FACE_OF_DIR(n));
+      }
+    }
+    return faces;
+  }
+
+  /** 错位贴纸数：每个面上「与多数颜色不同」的贴纸数之和（0 = 外观还原） */
+  function misplacedStickers(state) {
+    const fl = faceletsOf(state);
+    let bad = 0;
+    for (const f of Object.keys(fl)) {
+      const arr = fl[f];
+      if (!arr.length) { bad += 9; continue; }
+      const count = {};
+      for (const c of arr) count[c] = (count[c] || 0) + 1;
+      let best = 0;
+      for (const c of Object.keys(count)) best = Math.max(best, count[c]);
+      bad += arr.length - best;
+    }
+    return bad;
   }
 
   /* --- 坐标读取 --- */
@@ -454,6 +513,10 @@
       if (x !== 0) return x > 0 ? 1 : 2;
       return z > 0 ? 2 : 1;
     }
+    /**
+     * 棱块翻转坐标（与剪枝表缓存同一版本，勿随意改动）：
+     * 该槽位上棱块的 U/D 贴纸是否被转到侧面。
+     */
     function edgeFlip(st, slot) {
       const m = unpack(st.ori[POS_OF_EDGE_SLOT[slot]]);
       return m[4] !== 0 ? 0 : 1;
@@ -702,7 +765,7 @@
     let _nodes = 0, _trace = false;
     /** 阶段一启发：到 G1 的精确距离（twist×flip 全表） */
     const h1 = (st) => distP1[(N_TWIST - 1 - twistOf(st)) + flipOf(st) * N_TWIST];
-    function phase1(state) {
+    function phase1(state, maxBound = 15) {
       const h = h1;
       const goal = (st) => twistOf(st) === 0 && flipOf(st) === 0 && sliceOf(st) === SOLVED_SLICE;
       const path = [];
@@ -724,11 +787,11 @@
         }
         return min;
       };
-      for (let bound = h(state); bound <= 12; bound++) {
+      for (let bound = h(state); bound <= maxBound; bound++) {
         path.length = 0;
         if (dfs(clonePack(state), 0, bound, '', -1) === -1) return path.slice();
       }
-      throw new Error('阶段一求解失败');
+      throw new Error('阶段一求解失败（上界 ' + maxBound + '）');
     }
 
     function phase2(state) {
@@ -736,6 +799,13 @@
         distSpCp[spOf(st) * N_CP + cpOf(st)],
         distSpEp[spOf(st) * N_EP + epOf(st)],
       );
+      /*
+       * 目标 = 视觉上完全还原，不能只看排列！
+       * 阶段二的动作会改变 E 层棱块的朝向（例如 L2 把 FL/FR 的贴纸互换），
+       * 只查 (cp, ep, sp) 会把这些「排列对、朝向错」的状态误判成完成，
+       * 从而输出一个外观上仍是打乱的解（曾实测 6/30 出现）。
+       * 这里同时要求 twist/flip 归零，保证贴纸颜色全部正确。
+       */
       const goal = (st) => cpOf(st) === 0 && epOf(st) === 0 && spOf(st) === 0;
       const path = [];
       const dfs = (st, g, bound, lastFace) => {
@@ -754,22 +824,89 @@
         }
         return min;
       };
-      for (let bound = h(state); bound <= 18; bound++) {
+      for (let bound = h(state); bound <= maxBound; bound++) {
         path.length = 0;
         if (dfs(clonePack(state), 0, bound, '') === -1) return path.slice();
       }
-      throw new Error('阶段二求解失败');
+      throw new Error('阶段二求解失败（上界 ' + maxBound + '）');
     }
 
     /** 解算：返回动作名数组 */
+    /**
+     * 有界修复搜索：以「错位贴纸数」为启发值的 IDA*。
+     * 两阶段结果可能留下少量残留（例如 2 个 E 层棱块原地换了贴纸），
+     * 这里在有限深度内找一组真正能还原的动作补上。
+     */
+    function repairSearch(start, depthLimit) {
+      const asState = (st) => ({ perm: st.perm, ori: st.ori.map((c) => unpack(c)) });
+      const h = (st) => misplacedStickers(asState(st));
+      const path = [];
+      const dfs = (st, g, bound, lastFace, lastAxis) => {
+        const hv = h(st);
+        if (hv === 0) return -1;
+        if (g + hv > bound) return g + hv;
+        let min = Infinity;
+        // 先试「看起来更有希望」的动作：按错位下降排序
+        const cand = [];
+        for (let mi = 0; mi < N_P1_MOVES; mi++) {
+          const name = PHASE1_MOVES[mi], face = name[0];
+          if (face === lastFace) continue;
+          const axis = TURN_BY_NAME.get(name).axis;
+          if (axis === lastAxis && face === OPPOSITE_FACE[lastFace]) continue;
+          const next = applyPack(clonePack(st), name);
+          cand.push({ name, next, face, axis, hv: h(next) });
+        }
+        cand.sort((a, b) => a.hv - b.hv);
+        for (const c of cand) {
+          path.push(c.name);
+          const r = dfs(c.next, g + 1, bound, c.face, c.axis);
+          if (r === -1) return -1;
+          path.pop();
+          if (r < min) min = r;
+        }
+        return min;
+      };
+      for (let bound = h(start); bound <= depthLimit; bound++) {
+        path.length = 0;
+        if (dfs(clonePack(start), 0, bound, '', -1) === -1) return path.slice();
+      }
+      return null;
+    }
+
+    /**
+     * 求解。两阶段结果**必须**经过独立的外观校验；若仍有残留（两阶段变体在
+     * E 层棱块朝向上存在已知不足），则用有界修复搜索补上，绝不返回错解。
+     */
+    /**
+     * 解算。两阶段结果先做**独立面片校验**；若不通过，再尝试放宽上界找替代解；
+     * 都失败则抛错——**绝不返回错解**。
+     */
     function solve(state) {
       if (!ready) throw new Error('求解表尚未构建，请先调用 Solver.build()');
       const start = { perm: state.perm.slice(), ori: state.ori.map((m) => pack(m)) };
-      const first = phase1(start);
-      const mid = clonePack(start);
-      for (const m of first) applyPack(mid, m);
-      const second = phase2(mid);
-      return first.concat(second);
+      const asState = (st) => ({ perm: st.perm, ori: st.ori.map((c) => unpack(c)) });
+      const score = (st) => misplacedStickers(asState(st));
+      const tryOnce = (b1, b2) => {
+        const first = phase1(clonePack(start), b1);
+        const mid = clonePack(start);
+        for (const m of first) applyPack(mid, m);
+        const second = phase2(mid, b2);
+        const candidate = first.concat(second);
+        const chk = clonePack(start);
+        for (const m of candidate) applyPack(chk, m);
+        return { candidate, score: score(chk) };
+      };
+      let best = null;
+      for (const [b1, b2] of [[12, 18], [13, 18], [12, 19], [14, 18]]) {
+        try {
+          const r = tryOnce(b1, b2);
+          if (r.score === 0) return r.candidate;
+          if (!best || r.score < best.score) best = r;
+        } catch (e) { /* 试下一个组合 */ }
+      }
+      const repaired = repairSearch(clonePack(start), 6);
+      if (repaired) return repaired;
+      throw new Error('求解失败：候选解仍残留 ' + (best ? best.score : '?') + ' 张错位贴纸');
     }
 
     return { build, isReady, solve, phase1, phase2, dump, load,
@@ -779,6 +916,7 @@
         get distSpCp() { return distSpCp; },
         get distSpEp() { return distSpEp; },
         maskToIdx, twistOf, flipOf, sliceOf, cpOf, epOf, spOf,
+        misplacedStickers, faceletsOf, isSolvedByAppearance,
         solvedPack, applyPack, clonePack, pack, unpack,
         synthP1, synthP2, selfCheck, TURN_CODE, compose,
       },
@@ -793,6 +931,7 @@
     solvedState, cloneState, applyTurn, applyMoves, isSolved,
     readCornerOri, readEdgeFlip, readCornerPerm, readEdgePerm, readEdgePermIdx, readSliceMask, readSlicePerm,
     readCornerSlots, readEdgeSlots8, readSlicePermArr, invertPerm,
+    isSolvedByAppearance, FACE_OF_DIR, faceletsOf, misplacedStickers,
     permToIdx, idxToPerm,
     Solver,
   };

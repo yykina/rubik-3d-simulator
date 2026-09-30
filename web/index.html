@@ -73,7 +73,7 @@
   <div class="stat"><span class="k">计时</span><span class="v" id="timer">0.00</span></div>
   <div class="stat"><span class="k">步数</span><span class="v" id="moves">0</span></div>
   <div class="stat"><span class="k">状态</span><span class="v small" id="state">已还原</span></div>
-  <div class="stat"><span class="k">求解器</span><span class="v small" id="solver-state">加载中…</span></div>
+  <div class="stat"><span class="k">求解器</span><span class="v small" id="solver-state">本轮未启用</span></div>
 </div>
 
 <div id="keymap" class="panel">
@@ -98,8 +98,8 @@
   <button id="btn-reset">还原</button>
   <button id="btn-undo" class="ghost">撤销</button>
   <div class="sep"></div>
-  <button id="btn-hint" disabled>提示</button>
-  <button id="btn-solve" disabled>自动求解</button>
+  <button id="btn-hint" disabled title="求解器搜索尚未达标，本轮已停用">提示（暂不可用）</button>
+  <button id="btn-solve" disabled title="求解器搜索尚未达标，本轮已停用">自动求解（暂不可用）</button>
   <button id="btn-stop" class="ghost" style="display:none">停止</button>
   <div class="spacer"></div>
   <button id="btn-view" class="ghost">复位视角</button>
@@ -217,8 +217,19 @@ let timerStart = null, timerRunning = false;
 let scrambling = false;
 
 /** 内核的 3×3 列主序矩阵 → THREE 四元数（与内核的乘法顺序保持一致） */
+/**
+ * 内核的 3×3 矩阵 → THREE 四元数。
+ * 内核用行主序存 m[row*3+col]（见 cube-core 的 mul/applyM），
+ * THREE.Matrix4.set 的参数同样是行主序，因此**必须原样传入，不能转置**。
+ * 曾把行列互换，导致贴纸朝向与目标槽位不一致（实测 5 步后 4/54 张贴纸指向错误）。
+ */
 function toQuat(m) {
-  const t = new THREE.Matrix4().set(m[0], m[3], m[6], 0, m[1], m[4], m[7], 0, m[2], m[5], m[8], 0, 0, 0, 0, 1);
+  const t = new THREE.Matrix4().set(
+    m[0], m[1], m[2], 0,
+    m[3], m[4], m[5], 0,
+    m[6], m[7], m[8], 0,
+    0, 0, 0, 1
+  );
   return new THREE.Quaternion().setFromRotationMatrix(t);
 }
 /** 逻辑状态 → 视觉（每步结束后调用） */
@@ -258,7 +269,18 @@ function perform(move, opts = {}) {
       quat: toQuat(state.ori[slot]),
     });
   }
-  const total = (turn.deg * Math.PI) / 180;
+  /*
+   * 动画方式：不自己推旋转方向，而是先算出「这一步结束后每个小块的最终姿态」，
+   * 再对四元数做球面插值。这样动画终点与 syncVisual() 的结果**必然一致**，
+   * 不会再出现「动画转的方向和逻辑落点相反」的问题。
+   */
+  const preview = Core.cloneState(state);
+  Core.applyTurn(preview, move);
+  for (const m of moving) {
+    const toSlot = preview.perm.indexOf(m.pc.index);
+    m.to = new THREE.Vector3().fromArray(CUBIES[toSlot].home.map((v) => v * SCALE));
+    m.toQuat = toQuat(preview.ori[toSlot]);
+  }
   const duration = opts.duration ?? (opts.fast ? 110 : 200);
   const t0 = performance.now();
 
@@ -266,20 +288,21 @@ function perform(move, opts = {}) {
     tick(now) {
       const p = duration <= 0 ? 1 : Math.min(1, (now - t0) / duration);
       const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;   // easeInOutQuad
-      const q = new THREE.Quaternion().setFromAxisAngle(axis, total * e);
       for (const m of moving) {
-        m.pc.group.position.copy(m.from).applyQuaternion(q);
-        m.pc.group.quaternion.copy(q).multiply(m.quat);
+        m.pc.group.position.lerpVectors(m.from, m.to, e);
+        m.pc.group.quaternion.slerpQuaternions(m.quat, m.toQuat, e);
       }
       if (p >= 1) {
         anim = null;
         Core.applyTurn(state, move);
         syncVisual();
         if (!opts.silent) {
-          if (!scrambling) history.push(move);
-          moveCount++;
-          $('moves').textContent = String(moveCount);
-          startTimer();
+          history.push(move);
+          if (!scrambling) {
+            moveCount++;
+            $('moves').textContent = String(moveCount);
+            startTimer();
+          }
           refreshSolved();
         }
         if (opts.onDone) opts.onDone();
@@ -301,10 +324,11 @@ function startTimer() {
 }
 function stopTimer() { timerRunning = false; timerEl.classList.remove('running'); }
 function resetTimer() { stopTimer(); timerStart = null; timerEl.textContent = '0.00'; }
-function refreshSolved() {
+function refreshSolved(opts = {}) {
   const solved = Core.isSolved(state);
   stateEl.textContent = solved ? (moveCount ? '已还原 🎉' : '已还原') : '打乱中';
   stateEl.style.color = solved && moveCount ? '#7ee787' : '';
+  if (opts.skipTimer) return;
   if (solved && timerRunning) { stopTimer(); flashStatus(`完成！${moveCount} 步，用时 ${timerEl.textContent} 秒`); }
 }
 function flashStatus(text) {
@@ -325,34 +349,110 @@ function randomScramble(n = 25) {
   }
   return out;
 }
+/*
+ * 取消机制：任何「打断性操作」（还原 / 重新打乱 / 停止求解）都会把 token 加一，
+ * 正在等待的异步动作（打乱循环、自动播放）看到 token 变化就立即停止，
+ * 而正在进行的那一步动画结束后也不会再改逻辑状态。
+ */
+let cancelToken = 0;
+function cancelPending() {
+  cancelToken++;
+  queue.length = 0;
+  anim = null;                    // 丢弃当前动画：不再推进、不再落逻辑状态
+  scrambling = false;
+}
+
 async function doScramble() {
   if (scrambling) return;
   stopAutoplay();
-  while (anim || queue.length) await new Promise((r) => setTimeout(r, 30));
+  cancelPending();
+  const my = cancelToken;
   scrambling = true;
+  // 打乱期间：不计步数、不开始计时、不记历史
   history = []; moveCount = 0; $('moves').textContent = '0';
   resetTimer(); hideSolution();
-  for (const m of randomScramble(25)) await performAsync(m, { fast: true, duration: 70 });
+  for (const m of randomScramble(25)) {
+    if (my !== cancelToken) return;                     // 被打断
+    await performAsync(m, { fast: true, duration: 70, silent: true });
+  }
+  if (my !== cancelToken) return;
   scrambling = false;
-  refreshSolved();
-  startTimer();                               // 打乱后开始计时
+  // 打乱结束才算开始：步数归零、计时从此刻起
+  history = []; moveCount = 0; $('moves').textContent = '0';
+  resetTimer();
+  syncVisual();
+  refreshSolved({ skipTimer: true });
+  startTimer();
   flashStatus('已打乱 · 计时开始');
 }
+
 function undo() {
   if (anim || !history.length) return;
   const last = history.pop();
   moveCount = Math.max(0, moveCount - 1);
   $('moves').textContent = String(moveCount);
-  perform(TURN_INVERSE.get(last), { silent: true, fast: true });
+  // silent 只表示「不记历史、不加步数」，仍要刷新完成状态与计时
+  perform(TURN_INVERSE.get(last), { silent: true, fast: true, onDone: () => refreshSolved() });
 }
+
 function resetCube() {
   stopAutoplay();
-  queue.length = 0;
+  cancelPending();
   const fresh = Core.solvedState();
   for (let i = 0; i < 26; i++) { state.perm[i] = fresh.perm[i]; state.ori[i] = fresh.ori[i]; }
   history = []; moveCount = 0; $('moves').textContent = '0';
-  resetTimer(); hideSolution(); syncVisual(); refreshSolved();
+  resetTimer(); hideSolution(); syncVisual(); refreshSolved({ skipTimer: true });
   flashStatus('已还原');
+}
+
+/* ============================== 整体旋转 ============================== */
+/**
+ * 把整个魔方绕某个世界轴旋转 90°。
+ * 这是「换一个面朝向自己」，不改变还原状态（还原仍是还原），也不计入步数/历史。
+ * 实现：对全部 26 个小块左乘同一旋转矩阵，视觉上与逻辑上同时生效。
+ */
+function rotateWhole(axisIdx, sign) {
+  if (anim) return;
+  const deg = 90 * sign;
+  const rot = Core.rotMatrix(axisIdx, deg);
+  // 逻辑：所有块的位置与朝向一起旋转
+  const oldPerm = state.perm.slice();
+  const oldOri = state.ori.map((m) => m.slice());
+  const newPerm = new Array(26);
+  const newOri = new Array(26);
+  for (let slot = 0; slot < 26; slot++) {
+    const home = CUBIES[slot].home;
+    const target = Core.applyM(rot, home);
+    // 找到目标位置对应的槽位
+    const toSlot = CUBIES.findIndex((c) => c.home[0] === target[0] && c.home[1] === target[1] && c.home[2] === target[2]);
+    newPerm[toSlot] = oldPerm[slot];
+    newOri[toSlot] = Core.mul(rot, oldOri[slot]);
+  }
+  // 视觉动画：用四元数把当前姿态插值到目标姿态
+  const axisVec = new THREE.Vector3(axisIdx === 0 ? 1 : 0, axisIdx === 1 ? 1 : 0, axisIdx === 2 ? 1 : 0);
+  const fromPos = pieces.map((p) => p.group.position.clone());
+  const fromQuat = pieces.map((p) => p.group.quaternion.clone());
+  const q = new THREE.Quaternion().setFromAxisAngle(axisVec, (deg * Math.PI) / 180);
+  const toPos = fromPos.map((v) => v.clone().applyQuaternion(q));
+  const toQuat = fromQuat.map((qq) => q.clone().multiply(qq));
+  const t0 = performance.now();
+  anim = {
+    tick(now) {
+      const p = Math.min(1, (now - t0) / 220);
+      const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+      for (let i = 0; i < pieces.length; i++) {
+        pieces[i].group.position.lerpVectors(fromPos[i], toPos[i], e);
+        pieces[i].group.quaternion.slerpQuaternions(fromQuat[i], toQuat[i], e);
+      }
+      if (p >= 1) {
+        anim = null;
+        state.perm = newPerm;
+        state.ori = newOri;
+        syncVisual();
+        refreshSolved({ skipTimer: true });
+      }
+    },
+  };
 }
 
 /* ============================== 鼠标/触摸交互 ============================== */
@@ -426,11 +526,9 @@ addEventListener('keydown', (ev) => {
   if (k === ' ') { ev.preventDefault(); doScramble(); return; }
   if (k === 'ESCAPE') { stopAutoplay(); return; }
   if ('UDLRFB'.includes(k)) { ev.preventDefault(); perform(ev.shiftKey ? k + "'" : k); return; }
-  if ('XYZ'.includes(k)) {                    // 整体转：等价于两层同向转
+  if ('XYZ'.includes(k)) {                    // 整体转（转动整个魔方，不改动相对还原状态）
     ev.preventDefault();
-    const base = { X: ['R', "L'"], Y: ['U', "D'"], Z: ['F', "B'"] }[k];
-    const moves = (ev.shiftKey ? base.map((m) => TURN_INVERSE.get(m)) : base);
-    for (const m of moves) perform(m, { silent: true, fast: true });
+    rotateWhole({ X: 0, Y: 1, Z: 2 }[k], ev.shiftKey ? 1 : -1);
   }
 });
 
@@ -446,7 +544,14 @@ const solverStateEl = $('solver-state');
 const toastEl = $('toast'), toastText = $('toast-text'), toastBar = $('toast-bar');
 let pendingSolve = null, solveSeq = 0;
 
+/*
+ * 本轮停用自动求解：两阶段搜索在本项目的坐标下还会留下可见错位（详见 STATUS.md），
+ * 与其返回错解，不如明确停用。求解表构建 Worker 也就不再启动。
+ * 手动玩法（打乱/转动/撤销/计时）完全不受影响。
+ */
+const SOLVER_ENABLED = false;
 (function initWorker() {
+  if (!SOLVER_ENABLED) { solverStateEl.textContent = '本轮未启用'; return; }
   try { worker = new Worker('solver-worker.js'); }
   catch (e) { solverStateEl.textContent = '不可用'; return; }
   worker.onmessage = (ev) => {
@@ -488,6 +593,7 @@ function setSolving(on) {
 
 /** 请求解算；表还没就绪时排队等待 */
 function requestSolve(cb) {
+  if (!SOLVER_ENABLED) { flashStatus('自动求解本轮未启用（测试阶段发现搜索仍会留下错位）'); return; }
   if (!solverReady) {
     flashStatus('求解表还在准备中，就绪后会自动继续');
     pendingSolve = () => requestSolve(cb);
@@ -524,6 +630,7 @@ function hideSolution() { shown = []; solutionEl.classList.remove('show'); }
 let autoplayToken = 0;
 function stopAutoplay() {
   autoplayToken++;
+  cancelPending();
   $('btn-stop').style.display = 'none';
 }
 async function playSolution(moves) {

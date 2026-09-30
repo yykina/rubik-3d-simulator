@@ -2,11 +2,13 @@
   "name": "rubik-3d-simulator",
   "version": "0.1.0",
   "private": true,
-  "description": "三维魔方模拟器（3×3×3）：Three.js 渲染 + Kociemba 两阶段求解器",
+  "description": "三维魔方模拟器（3×3×3）：Three.js 渲染 + 手动玩法（打乱/转动/撤销/计时/整体转）；求解器搜索本轮未启用",
   "scripts": {
-    "test": "node --max-old-space-size=4096 src/test-core.js",
+    "test": "node src/test-core.js",
     "tables": "node --max-old-space-size=4096 src/debug/build-tables.js",
-    "serve": "node tools/serve.js"
+    "serve": "node tools/serve.js",
+    "verify": "node tools/verify-web.js",
+    "verify:solver": "node --max-old-space-size=4096 tools/verify-solver-core.js"
   },
   "devDependencies": {
     "playwright": "^1.49.0"
