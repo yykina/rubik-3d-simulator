@@ -28,3 +28,4 @@ for (const seq of cases) {
   if (m === 0) ok++; else { bad++; console.log('✗ 未还原（残留 ' + m + ' 张）:', seq.join(' '), '→', sol.join(' ')); }
 }
 console.log(`\nA 路线验收：${ok}/${cases.length} 正确，失败 ${bad}，平均 ${(total / cases.length).toFixed(0)}ms，最坏 ${worst}ms，平均解长 ${(len / cases.length).toFixed(1)} 步`);
+process.exitCode = bad === 0 ? 0 : 1;

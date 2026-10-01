@@ -5,3 +5,10 @@ node_modules/
 # 浏览器测试产物
 .pw-browsers/
 .npm-cache/
+test-results/
+playwright-report/
+
+# 本地凭据
+.env
+.env.*
+!.env.example

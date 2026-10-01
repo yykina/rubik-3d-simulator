@@ -64,6 +64,9 @@ const FOOTER = [
   '',
 ].join('\n');
 
-const bundle = HEADER + wrapFile('cube.js') + wrapFile('solve.js') + FOOTER;
+const license = fs.readFileSync(path.join(SRC, 'LICENSE'), 'utf8');
+const bundle = '/*\n' + license + '\n*/\n' + HEADER + wrapFile('cube.js') + wrapFile('solve.js') + FOOTER;
+fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, bundle);
+fs.writeFileSync(path.join(path.dirname(OUT), 'LICENSE'), license);
 console.log('已生成', path.relative(path.join(__dirname, '..'), OUT), (bundle.length / 1024).toFixed(1) + ' KB');

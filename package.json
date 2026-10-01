@@ -2,7 +2,7 @@
   "name": "rubik-3d-simulator",
   "version": "0.1.0",
   "private": true,
-  "description": "三维魔方模拟器（3×3×3）：Three.js 渲染 + 手动玩法（打乱/转动/撤销/计时/整体转）；求解器搜索本轮未启用",
+  "description": "三维魔方模拟器（3×3×3）：Three.js 渲染、手动玩法、cubejs 自动求解与提示",
   "scripts": {
     "test": "node src/test-core.js",
     "serve": "node tools/serve.js",

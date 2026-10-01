@@ -4,7 +4,7 @@
 
 - `src/cube-core.js` — 3×3×3 内核：几何、状态操作、朝向读取、官方面片编码。
   Node 下导出 CommonJS，浏览器下挂 `window.CubeCore`（UMD）。
-  （自研剪枝表求解器已移除；求解由 cubejs 承担，内核只负责状态与面片编码。）
+  （旧自研求解实验仍保留，页面求解由 cubejs 承担；测试只使用旧代码的压缩状态工具。）
 - `src/test-core.js` — 测试脚本：几何自检、与 Kociemba 官方表的回归断言、编码/状态机一致性。
 - `src/SOLVER-NOTES.md` — **求解器设计与踩坑记录，改求解器前必读。**
 - `vendor/cubejs/` — 求解器 cubejs 1.3.2（ldez/cubejs，MIT）原始 CommonJS 源码。
@@ -28,7 +28,7 @@ node --check src/cube-core.js        # 语法检查
 ```
 
 首次打开页面时求解器会在空闲时初始化（`Cube.initSolver()`，约 1.7 秒），
-期间界面完全可玩；就绪后「提示 / 自动求解」按钮自动启用。
+同步建表期间主线程可能短暂阻塞；就绪后「提示 / 自动求解」按钮自动启用。
 
 ## Coding Style & Naming Conventions
 

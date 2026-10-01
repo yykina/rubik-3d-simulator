@@ -3,7 +3,7 @@
  *
  *   1) 几何层：26 个 cubie + 24 种转动的置换/朝向增量
  *   2) 状态层：可执行、可回放的魔方状态与各种坐标读取
- *   3) 求解层：Kociemba 两阶段搜索（IDA* + 剪枝表）
+   *   3) 面片编码：通过 faceletString 接入 cubejs；旧求解实验保留但界面不使用
  *
  * 约定（与标准魔方记号一致）：
  *   U 从上方看顺时针，把前面 +z 转到右面 +x  →  绕 +y 轴 -90°
@@ -66,7 +66,7 @@
     if (c.kind === 'edge') { EDGE_SLOT[i] = c.piece; POS_OF_EDGE_SLOT[c.piece] = i; }
   });
 
-  /* --- 3×3 整数矩阵，列主序：v' = M·v --- */
+  /* --- 3×3 整数矩阵，行主序：v' = M·v --- */
   const IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1];
   function mul(a, b) {
     return [
@@ -189,9 +189,8 @@
 
   /*
    * 「是否已还原」= 外观上还原（见 isSolvedByAppearance）。
-   * 注意不要退化成「所有朝向矩阵都是单位矩阵」：E 层棱块（FR/FL/BL/BR）与面心块
-   * 存在**不可见的朝向冗余**，例如 R2 之后外观完全还原，但它们的朝向矩阵并非单位矩阵。
-   * 用矩阵判等会把这种「看起来已还原」的状态误判成未还原。
+   * 面心块有不可见的朝向冗余；整体旋转也不改变还原程度。
+   * 角块与棱块的贴纸朝向偏差都是可见的，不能忽略。
    */
   function isSolved(state) { return isSolvedByAppearance(state); }
 
@@ -201,30 +200,32 @@
   /**
    * 「外观还原」判定：只看玩家能看到的东西，不看内部朝向表示。
    *
-   * 规则：每块的位置必须归位；对每张贴纸而言，
-   *   - 它必须朝向该槽位的外表面（不能指向内部）；
-   *   - 它指向的那个面，必须正好是它自己所属的颜色面。
-   * 等价的说法是：每个外表面上的 9 张贴纸颜色一致，且每块都在原位。
-   * 这样 E 层棱块/面心块的不可见朝向冗余会被自然忽略。
+   * 用当前六个面心的颜色作为各面的目标，允许魔方整体旋转。
+   * 每张贴纸必须朝外并与所在面的面心同色，每面必须恰有 9 张贴纸。
+   * 直接检查位置和法向，不依赖 faceletsOf / misplacedStickers 的独立校验。
    */
   function isSolvedByAppearance(state) {
+    const centerColors = {};
+    const counts = { U: 0, R: 0, F: 0, D: 0, L: 0, B: 0 };
     for (let slot = 0; slot < 26; slot++) {
-      if (state.perm[slot] !== slot) return false;          // 位置必须归位
+      if (CUBIES[slot].kind !== 'center') continue;
+      const piece = CUBIES[state.perm[slot]];
+      if (piece.kind !== 'center') return false;
+      centerColors[FACE_OF_DIR(CUBIES[slot].home)] = FACE_OF_DIR(piece.normals[0]);
+    }
+    for (let slot = 0; slot < 26; slot++) {
       const home = CUBIES[slot].home;
-      const piece = CUBIES[slot];                            // 归位后自身即该块
+      const piece = CUBIES[state.perm[slot]];
       for (const n of piece.normals) {
         const w = applyM(state.ori[slot], n);
         const dir = w.findIndex((v) => v !== 0);
-        if (dir < 0) return false;
-        // 贴纸最终指向的面，必须与它所属的颜色面相同
-        const target = [0, 0, 0];
-        target[dir] = w[dir] > 0 ? 1 : -1;
-        if (FACE_OF_DIR(target) !== FACE_OF_DIR(n)) return false;
-        // 也要保证它指向的是外表面而不是内部
-        if (home[dir] === 0) return false;
+        if (dir < 0 || home[dir] !== w[dir]) return false;
+        const face = FACE_OF_DIR(w);
+        if (centerColors[face] !== FACE_OF_DIR(n)) return false;
+        counts[face]++;
       }
     }
-    return true;
+    return Object.values(counts).every((n) => n === 9);
   }
 
   /**

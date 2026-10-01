@@ -2,8 +2,7 @@
  * 内核测试：几何、编码、状态机、还原判定。
  * 运行：node src/test-core.js
  *
- * 注意：求解器搜索目前不可靠（见 STATUS.md），因此这里**不**把「求解成功」当作通过条件，
- * 只验证不依赖求解器的核心不变量。求解器相关验证见 tools/verify-solver-core.js。
+ * 本脚本验证不依赖求解器的核心不变量；cubejs 求解回放见 tools/verify-cubejs.js。
  */
 const C = require('./cube-core.js');
 
@@ -140,6 +139,24 @@ ok(JSON.stringify(I.unpack(I.pack(C.IDENTITY))) === JSON.stringify(C.IDENTITY), 
     if (I.unpack(I.pack(m)).join(',') !== k) roundTrip = false;
   }
   ok(seen.size === 24 && roundTrip, '24 种旋转编码往返一致');
+  let appearance = true;
+  for (const k of seen) {
+    const rot = k.split(',').map(Number);
+    const rotate = (st) => {
+      const out = C.solvedState();
+      for (let from = 0; from < 26; from++) {
+        const target = C.applyM(rot, C.CUBIES[from].home);
+        const to = C.CUBIES.findIndex((c) => c.home.join(',') === target.join(','));
+        out.perm[to] = st.perm[from];
+        out.ori[to] = C.mul(rot, st.ori[from]);
+      }
+      return out;
+    };
+    const solved = rotate(C.solvedState());
+    const scrambled = rotate(run("R U F2"));
+    if (!C.isSolved(solved) || C.misplacedStickers(solved) !== 0 || C.isSolved(scrambled)) appearance = false;
+  }
+  ok(appearance, '全部 24 种整体朝向下，还原态与打乱态判定正确');
 }
 {
   // 压缩状态机 vs 几何状态机

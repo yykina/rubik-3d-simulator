@@ -21,7 +21,7 @@ const { chromium } = require('playwright');
 const { spawn } = require('child_process');
 
 const PORT = 5179;
-const OUT = path.join(__dirname, '..', 'shots');
+const OUT = path.join(__dirname, '..', 'test-results', 'shots');
 fs.mkdirSync(OUT, { recursive: true });
 
 const failures = [];
@@ -33,11 +33,13 @@ function check(cond, label, extra) {
   }
 }
 
+let server;
+let browser;
 (async () => {
-  const server = spawn(process.execPath, [path.join(__dirname, 'serve.js'), String(PORT)], { stdio: 'ignore' });
+  server = spawn(process.execPath, [path.join(__dirname, 'serve.js'), String(PORT)], { stdio: 'ignore' });
   await new Promise((r) => setTimeout(r, 600));
 
-  const browser = await chromium.launch();
+  browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
   const page = await ctx.newPage();
 
@@ -159,7 +161,24 @@ function check(cond, label, extra) {
     { before: beforeX.misplaced, after: afterX.misplaced });
   check(afterX.moves === beforeX.moves, '整体转不计步数', { before: beforeX.moves, after: afterX.moves });
 
-  /* ---------------- 8. 求解（当前版本已停用，做状态断言） ---------------- */
+  console.log('\n[7b] 已还原魔方整体转');
+  await page.click('#btn-reset');
+  for (const key of ['x', 'y', 'z']) {
+    await page.keyboard.press(key);
+    await page.waitForFunction(() => !window.__cube.debugState.anim);
+    const rotated = await page.evaluate(() => ({
+      solved: window.__cube.Core.isSolved(window.__cube.state),
+      misplaced: window.__cube.Core.misplacedStickers(window.__cube.state),
+      state: document.getElementById('state').textContent,
+      moves: document.getElementById('moves').textContent,
+      timer: document.getElementById('timer').textContent,
+    }));
+    check(rotated.solved && rotated.misplaced === 0 && rotated.state === '已还原'
+      && rotated.moves === '0' && rotated.timer === '0.00',
+    `整体转 ${key.toUpperCase()} 后仍显示已还原，步数与计时不变`, rotated);
+  }
+
+  /* ---------------- 8. 求解（真实求解与播放） ---------------- */
   console.log('\n[8] 求解（cubejs）');
   const waitT0 = Date.now();
   let solverUp = false;
@@ -259,18 +278,18 @@ function check(cond, label, extra) {
   console.log('\n[9] 控制台');
   check(errors.length === 0, '无控制台错误/页面异常', errors.slice(0, 3));
 
-  await browser.close();
-  server.kill();
-
   console.log('');
   if (failures.length) {
     console.log(`❌ ${failures.length} 项失败:`);
     for (const f of failures) console.log('   - ' + f);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log('✅ 全部通过');
-  process.exit(0);
 })().catch((e) => {
   console.error('验证脚本异常:', e);
-  process.exit(1);
+  process.exitCode = 1;
+}).finally(async () => {
+  try { if (browser) await browser.close(); }
+  finally { if (server) server.kill(); }
 });
