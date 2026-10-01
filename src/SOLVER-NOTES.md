@@ -275,3 +275,43 @@ IDA*，但**直接携带真实状态**（每层 clone），启发值取坐标剪
   - **B**：放弃坐标法，直接在「真实状态 + 面片判定」上做有界 IDA*（需要更强的启发式）。
 - **当前策略不变**：`Solver.solve()` 只在面片校验通过时返回结果，否则抛错；
   界面停用求解按钮，绝不返回错解。
+
+---
+
+## 2026-09-30（解决）A 路线完成：接入 cubejs，自动求解已上线 ✅
+
+### 最终架构（已上线）
+```
+内核状态 --Core.faceletString--> 官方 54 面片串 --Cube.fromString--> cube.solve() --> 动作序列
+```
+- 动作记号与内核一致，解序列可直接 `Core.applyMoves` 回放。
+- 求解器：**cubejs 1.3.2**（ldez/cubejs，MIT），收录在 `vendor/cubejs/`。
+- 浏览器包由 `tools/build-cubejs-browser.js` 生成（`web/vendor/cubejs/cubejs.browser.js`，
+  51 KB），挂 `window.Cube`。
+- 建表 `Cube.initSolver()` 约 **1.7 秒**，求解平均 **~0.1 秒**、平均解长 **~20 步**。
+
+### 打通「内核状态 → 官方面片串」的关键（绕了很多弯路，结论要记牢）
+1. **面片由「小块中心位置 + 贴纸法向」唯一确定**，两者缺一不可：
+   同一个 3D 位置在该角上有 3 张不同面的贴纸。
+2. 面片坐标与内核 `CUBIES[i].home` **同一尺度**（小块中心 −1/0/1，面片表面 ±0.5 格），
+   即 `贴纸位置 = home + 世界法向`。**不要**乘 2、不要做中心偏移。
+3. 各面的行/列轴向（官方布局）最终确定为：
+   ```
+   U: 列 +x, 行 +z      R: 列 −z, 行 −y      F: 列 +x, 行 −y
+   D: 列 +x, 行 −z      L: 列 +z, 行 −y      B: 列 −x, 行 −y
+   ```
+   验证方式：还原态串必须等于
+   `UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB`，
+   且 U/D/L/R/F/B 六个基本动作都要与 `new Cube().move(m).asString()` **逐字符一致**。
+
+### 同时修掉的两个界面 bug（都很有隐蔽性）
+1. `cancelPending()` 直接丢弃进行中的动画 → 逻辑状态少一步、
+   `await performAsync` 的 Promise **永不 resolve**（表现为自动播放卡死）。
+   改为先 `anim.finish()` **结算**再清理，并给结算函数加 `finished` 幂等标记。
+2. `perform()` 里提前 `Core.applyTurn(state, move)` → 逻辑状态被动画之外的地方改动，
+   动画终点慢一步。现在 `state` **只由 `settleAnim` 提交一次**。
+
+### 验收（可复现）
+- `node tools/verify-cubejs.js` → 20/20 正确、0 失败（含 16 个随机 25 步打乱）。
+- `npm test` → 全绿（含与 Kociemba 官方 cp/ep 表比对的回归断言）。
+- `npm run verify` → 端到端 23 项全绿，其中求解部分是**真实求解 + 播放 + 独立面片校验**。

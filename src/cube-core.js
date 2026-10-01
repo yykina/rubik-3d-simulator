@@ -998,6 +998,75 @@
       maskToIdx,
     };
   })();
+  /*
+   * ============================ 官方 facelet 字符串 ============================
+   * 生成 Kociemba 官方口径的 54 字符面片串（顺序 U R F D L B，每面 9 格行优先）。
+   * 用途：把本方状态交给成熟求解器（vendor/cubejs）求解。
+   *
+   * 映射规则（已用 cubejs 的 asString() 对 U/D/L/R/F/B 六个基本动作逐一验证一致）：
+   *   贴纸位置 = 小块 home + 该贴纸此刻的世界法向；配合法向即可唯一确定面片。
+   * 各面的行/列轴向由官方布局决定，见 FACE_AXES。
+   *
+   * ⚠️ 本函数是**与外部求解器对接的唯一通道**，改动后必须跑
+   *    `node tools/verify-cubejs.js`（端到端回放校验）与内核的官方表断言。
+   */
+  const FACELET_ORDER = ['U', 'R', 'F', 'D', 'L', 'B'];
+  const FACELET_INDEX = {};
+  FACELET_ORDER.forEach((f, fi) => { for (let i = 1; i <= 9; i++) FACELET_INDEX[f + i] = fi * 9 + (i - 1); });
+  const FACELET_AXES = {
+    U: { right: '+x', down: '+z' },
+    R: { right: '-z', down: '-y' },
+    F: { right: '+x', down: '-y' },
+    D: { right: '+x', down: '-z' },
+    L: { right: '+z', down: '-y' },
+    B: { right: '-x', down: '-y' },
+  };
+  const FACELET_NORMAL = { U: [0, 1, 0], R: [1, 0, 0], F: [0, 0, 1], D: [0, -1, 0], L: [-1, 0, 0], B: [0, 0, -1] };
+  const _axIdx = (a) => (a[1] === 'x' ? 0 : a[1] === 'y' ? 1 : 2);
+  const _axSign = (a) => (a[0] === '-' ? -1 : 1);
+  const _colorOfNormal = (v) => (v[0] ? (v[0] > 0 ? 'R' : 'L') : v[1] ? (v[1] > 0 ? 'U' : 'D') : (v[2] > 0 ? 'F' : 'B'));
+  const _posKey = (p, n) => p.join(',') + '|' + n.join(',');
+
+  /** (面片位置, 法向) → 面片名 */
+  const FACELET_POS = (() => {
+    const m = new Map();
+    for (const face of FACELET_ORDER) {
+      const n = FACELET_NORMAL[face];
+      const center = [n[0] * 2, n[1] * 2, n[2] * 2];
+      for (let i = 1; i <= 9; i++) {
+        const col = ((i - 1) % 3) - 1;
+        const row = Math.floor((i - 1) / 3) - 1;
+        const p = center.slice();
+        p[_axIdx(FACELET_AXES[face].right)] += _axSign(FACELET_AXES[face].right) * col;
+        p[_axIdx(FACELET_AXES[face].down)] += _axSign(FACELET_AXES[face].down) * row;
+        m.set(_posKey(p, n), face + i);
+      }
+    }
+    return m;
+  })();
+
+  /**
+   * 状态 → 官方 54 面片字符串。state 可省略（默认当前无状态，需显式传入）。
+   * 面心块（6 个中心）由其固定颜色直接填写。
+   */
+  function faceletString(state) {
+    const out = new Array(54).fill('?');
+    for (let slot = 0; slot < 26; slot++) {
+      const c = CUBIES[slot];
+      const piece = CUBIES[state.perm[slot]];
+      for (const n of piece.normals) {
+        const w = applyM(state.ori[slot], n);
+        const p = [c.home[0] + w[0], c.home[1] + w[1], c.home[2] + w[2]];
+        const name = FACELET_POS.get(_posKey(p, w));
+        if (!name) continue;
+        out[FACELET_INDEX[name]] = _colorOfNormal(n);
+      }
+    }
+    const filled = out.filter((v) => v !== '?').length;
+    if (filled !== 54) throw new Error('面片生成不完整：仅填了 ' + filled + '/54');
+    return out.join('');
+  }
+
   return {
     CUBIES, CORNER_POS, CORNER_NAMES, EDGE_POS, EDGE_NAMES, SLICE_EDGES,
     POS_OF_CORNER_SLOT, POS_OF_EDGE_SLOT, CORNER_SLOT, EDGE_SLOT,
@@ -1006,7 +1075,7 @@
     solvedState, cloneState, applyTurn, applyMoves, isSolved,
     readCornerOri, readEdgeFlip, readCornerPerm, readEdgePerm, readEdgePermIdx, readSliceMask, readSlicePerm,
     readCornerSlots, readEdgeSlots8, readSlicePermArr, invertPerm,
-    isSolvedByAppearance, FACE_OF_DIR, faceletsOf, misplacedStickers,
+    isSolvedByAppearance, FACE_OF_DIR, faceletsOf, misplacedStickers, faceletString,
     permToIdx, idxToPerm,
     Solver,
   };

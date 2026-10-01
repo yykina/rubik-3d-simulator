@@ -1,5 +1,39 @@
 # 变更日志
 
+## 2026-09-30 — 自动求解上线（A 路线：接入 cubejs）
+
+### 结果
+**自动求解与提示已可用**，并纳入端到端验证。求解平均 ~0.1 秒、平均解长 ~20 步。
+
+### 关键修复
+1. **找到求解器长期全盘失败的真正根因：内核转动方向与标准记号相反**
+   - 与 Kociemba 官方 `cubie.py` 的 `cp/co/ep/eo` 表逐项比对发现：
+     六个面转角原本全部写反，`move('U')` 实际等于标准 `U'`。
+   - 之所以长期未暴露：所有自检只验证「自洽性」（逆动作互消、`(R U R' U')×6`），
+     这些性质在**整体取逆后依然成立**。
+   - 这也是此前 min2phase / cube-solver / cubejs 三个标准实现全部对不上的真正原因。
+   - 已修正，并在 `src/test-core.js` 新增 **[1b] 与官方表比对** 回归断言（单步 + 多步组合）。
+2. **打通「内核状态 → 官方面片串」**（`Core.faceletString`）
+   - 面片 = 小块中心位置 + 贴纸法向（同一位置在该角上有 3 张不同面的贴纸）；
+     贴纸位置 = `home + 世界法向`。
+   - 六面行列轴向按官方布局校准；还原态串与官方一致，
+     且 U/D/L/R/F/B 六个动作与 cubejs `asString()` **逐字符一致**。
+3. **修复两个界面动画 bug（都很隐蔽）**
+   - `cancelPending()` 丢弃进行中的动画 → 逻辑状态少一步、`await performAsync`
+     的 Promise 永不 resolve（自动播放卡死）。改为先结算再清理，并加幂等标记。
+   - `perform()` 会提前改动逻辑状态 → 动画终点慢一步。现在 `state` 只由结算函数提交一次。
+
+### 结构调整
+- 求解器改为 **cubejs 1.3.2（MIT）**，源码收录于 `vendor/cubejs/`，
+  浏览器包由 `tools/build-cubejs-browser.js` 生成（挂 `window.Cube`）。
+- 移除自研剪枝表工具链（`src/debug/`、`web/solver-worker*.js`、`tools/seed-tables.js`）。
+- 脚本更新：`verify:solver` → `tools/verify-cubejs.js`；新增 `build:cubejs`。
+
+### 验证
+- `npm test` 全绿（含官方表回归断言）。
+- `node tools/verify-cubejs.js` → **20/20 正确、0 失败**（含 16 个随机 25 步打乱）。
+- `npm run verify` → 端到端全绿，求解部分为**真实求解 + 播放 + 独立面片校验**。
+
 ## 2026-09-30 — 按代码审查报告修复（CODE_REVIEW.md）
 
 审查报告共 7 项。逐项处理结果如下（含一项对审查结论的**修正**）。

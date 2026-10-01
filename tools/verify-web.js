@@ -14,13 +14,11 @@
  *   8. 提示 / 自动求解：结果必须通过**独立面片校验**（不依赖 Core.isSolved）
  *   9. 无控制台错误
  *
- * 环境变量 SEED_TABLES=1 时把 src/debug/solver-tables.bin 注入 IndexedDB，跳过首次构建。
  */
 const path = require('path');
 const fs = require('fs');
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
-const seeder = require('./seed-tables.js');
 
 const PORT = 5179;
 const OUT = path.join(__dirname, '..', 'shots');
@@ -41,7 +39,6 @@ function check(cond, label, extra) {
 
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
-  if (process.env.SEED_TABLES) await ctx.addInitScript(seeder());
   const page = await ctx.newPage();
 
   const errors = [];
@@ -163,49 +160,99 @@ function check(cond, label, extra) {
   check(afterX.moves === beforeX.moves, '整体转不计步数', { before: beforeX.moves, after: afterX.moves });
 
   /* ---------------- 8. 求解（当前版本已停用，做状态断言） ---------------- */
-  console.log('\n[8] 求解（本轮停用）');
+  console.log('\n[8] 求解（cubejs）');
+  const waitT0 = Date.now();
+  let solverUp = false;
+  while (Date.now() - waitT0 < 120000) {
+    solverUp = await page.evaluate(() => !document.getElementById('btn-solve').disabled);
+    if (solverUp) break;
+    await page.waitForTimeout(500);
+  }
+  check(solverUp, '求解器在 2 分钟内就绪（cubejs 建表）');
   const solverUi = await page.evaluate(() => ({
     state: document.getElementById('solver-state').textContent,
-    solveDisabled: document.getElementById('btn-solve').disabled,
-    hintDisabled: document.getElementById('btn-hint').disabled,
-    hintLabel: document.getElementById('btn-hint').textContent,
+    hasCube: typeof window.Cube !== 'undefined',
+    hasFacelet: typeof window.CubeCore.faceletString === 'function',
   }));
-  check(solverUi.solveDisabled && solverUi.hintDisabled, '求解按钮处于禁用状态', solverUi);
-  check(/未启用|就绪/.test(solverUi.state), '求解器状态文案明确', { state: solverUi.state });
-  // 若将来重新启用求解，这里会自动改为执行求解校验
-  if (!solverUi.solveDisabled) {
-    const waitT0 = Date.now();
-    let solverUp = false;
-    while (Date.now() - waitT0 < 480000) {
-      solverUp = await page.evaluate(() => !document.getElementById('btn-solve').disabled);
-      if (solverUp) break;
-      await page.waitForTimeout(2000);
-    }
-    check(solverUp, '求解器在 8 分钟内就绪');
-    if (solverUp) {
-      await page.click('#btn-scramble');
-      await page.waitForFunction(() => document.getElementById('state').textContent === '打乱中', null, { timeout: 60000 });
-      await page.waitForTimeout(2500);
-      const scrambleInfo = await page.evaluate(() => ({
-        perm: Array.from(window.__cube.state.perm),
-        ori: window.__cube.state.ori.map((m) => Array.from(m)),
+  check(solverUi.hasCube, 'cubejs 已加载（window.Cube）');
+  check(solverUi.hasFacelet, '内核提供官方面片编码 Core.faceletString');
+  check(/就绪/.test(solverUi.state), '求解器状态文案为「就绪」', { state: solverUi.state });
+
+  if (solverUp) {
+    // 面片编码必须与官方口径一致（用内核自己的状态生成，再交给 cubejs 解析回来求解）
+    const encOk = await page.evaluate(() => {
+      const C = window.CubeCore;
+      const solved = C.solvedState();
+      const SOLVED = 'UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB';
+      return C.faceletString(solved) === SOLVED;
+    });
+    check(encOk, '还原态面片串与官方一致');
+
+    // 端到端：打乱 → 求解 → 播放 → 独立面片校验
+    await page.click('#btn-scramble');
+    await page.waitForFunction(() => document.getElementById('state').textContent === '打乱中', null, { timeout: 60000 });
+    // 等打乱动画真正播完：只看文案会早于动画结束，导致点击被 anim 守卫拦下
+    await page.waitForFunction(
+      () => { const d = window.__cube.debugState; return !d.scrambling && !d.anim; },
+      null, { timeout: 60000 }
+    );
+    await page.waitForTimeout(300);
+    await page.click('#btn-solve');
+    // 轮询直到外观还原（同时打印中间现场，便于定位卡点）
+    let solvedOk = false;
+    const pollT0 = Date.now();
+    while (Date.now() - pollT0 < 120000) {
+      const snap = await page.evaluate(() => ({
+        misplaced: window.__cube.Core.misplacedStickers(window.__cube.state),
+        status: document.getElementById('status').textContent,
+        stopShown: document.getElementById('btn-stop').style.display !== 'none',
+        solShown: document.getElementById('solution').classList.contains('show'),
       }));
-      await page.click('#btn-solve');
-      const solvedOk = await page.waitForFunction(
-        () => window.__cube.Core.misplacedStickers(window.__cube.state) === 0,
-        null, { timeout: 300000 }
-      ).then(() => true).catch(() => false);
-      check(solvedOk, '自动求解后独立面片校验确认外观还原');
-      if (!solvedOk) {
-        const finalState = await page.evaluate(() => ({
-          misplaced: window.__cube.Core.misplacedStickers(window.__cube.state),
-          faces: window.__cube.Core.faceletsOf(window.__cube.state),
-        }));
-        console.log('  失败现场: perm=' + JSON.stringify(scrambleInfo.perm));
-        console.log('            ori=' + JSON.stringify(scrambleInfo.ori));
-        console.log('            faces=' + JSON.stringify(finalState.faces));
-      }
+      if (snap.misplaced === 0 && !snap.stopShown) { solvedOk = true; break; }
+      await page.waitForTimeout(1000);
     }
+    if (!solvedOk) {
+      const snap = await page.evaluate(() => ({
+        misplaced: window.__cube.Core.misplacedStickers(window.__cube.state),
+        status: document.getElementById('status').textContent,
+        stopShown: document.getElementById('btn-stop').style.display !== 'none',
+        solShown: document.getElementById('solution').classList.contains('show'),
+        toast: document.getElementById('toast-text').textContent,
+      }));
+      console.log('  轮询现场:', JSON.stringify(snap));
+    }
+    check(solvedOk, '打乱后自动求解并播放，独立面片校验确认外观还原');
+    if (!solvedOk) {
+      const finalState = await page.evaluate(() => ({
+        misplaced: window.__cube.Core.misplacedStickers(window.__cube.state),
+        faces: window.__cube.Core.faceletsOf(window.__cube.state),
+      }));
+      console.log('  失败现场: misplaced=' + finalState.misplaced + ' faces=' + JSON.stringify(finalState.faces));
+    }
+
+    // 提示按钮：给出解法但不播放（步数不应变化）
+    await page.click('#btn-reset');
+    await page.waitForTimeout(800);
+    await page.click('#btn-scramble');
+    await page.waitForFunction(
+      () => { const d = window.__cube.debugState; return !d.scrambling && !d.anim; },
+      null, { timeout: 60000 }
+    );
+    await page.waitForTimeout(300);
+    const beforeMoves = await page.evaluate(() => window.__cube.moveCount);
+    await page.click('#btn-hint');
+    await page.waitForFunction(
+      () => document.getElementById('solution').classList.contains('show'),
+      null, { timeout: 30000 }
+    ).catch(() => {});
+    await page.waitForTimeout(500);
+    await page.waitForTimeout(300);
+    const hintState = await page.evaluate(() => ({
+      shown: document.getElementById('solution').classList.contains('show'),
+      moves: window.__cube.moveCount,
+    }));
+    check(hintState.shown, '提示按钮展示了完整解法');
+    check(hintState.moves === beforeMoves, '提示不改变步数（只展示不播放）', { before: beforeMoves, after: hintState.moves });
   }
 
   /* ---------------- 9. 控制台 ---------------- */

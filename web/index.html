@@ -90,7 +90,7 @@
 <div id="toast" class="panel">
   <div id="toast-text">正在准备求解器…</div>
   <div class="bar"><i id="toast-bar"></i></div>
-  <div class="hint">首次使用需构建求解表（较慢），之后缓存到本地可秒级加载。构建期间仍可正常玩。</div>
+  <div class="hint">求解器基于 cubejs（Kociemba 两阶段算法，MIT）·首次点击需初始化约 1~2 秒</div>
 </div>
 
 <div id="controls" class="panel">
@@ -98,15 +98,17 @@
   <button id="btn-reset">还原</button>
   <button id="btn-undo" class="ghost">撤销</button>
   <div class="sep"></div>
-  <button id="btn-hint" disabled title="求解器搜索尚未达标，本轮已停用">提示（暂不可用）</button>
-  <button id="btn-solve" disabled title="求解器搜索尚未达标，本轮已停用">自动求解（暂不可用）</button>
+  <button id="btn-hint" disabled title="正在准备求解器">提示</button>
+  <button id="btn-solve" disabled title="正在准备求解器">自动求解</button>
   <button id="btn-stop" class="ghost" style="display:none">停止</button>
   <div class="spacer"></div>
   <button id="btn-view" class="ghost">复位视角</button>
 </div>
 
-<!-- 内核（几何 / 状态 / 求解器），UMD：浏览器下挂到 window.CubeCore -->
+<!-- 内核（几何 / 状态 / 面片编码），UMD：浏览器下挂到 window.CubeCore -->
 <script src="cube-core.js"></script>
+<!-- 求解器：cubejs（Kociemba 两阶段，MIT），浏览器下挂到 window.Cube -->
+<script src="vendor/cubejs/cubejs.browser.js"></script>
 
 <script type="importmap">
 {
@@ -274,6 +276,12 @@ function perform(move, opts = {}) {
    * 再对四元数做球面插值。这样动画终点与 syncVisual() 的结果**必然一致**，
    * 不会再出现「动画转的方向和逻辑落点相反」的问题。
    */
+  /*
+   * 计算这一步结束后的目标姿态：克隆当前状态再执行一次该动作。
+   * ⚠️ 绝对不要在这里直接动 `state` —— 逻辑状态只能由 settleAnim 提交一次。
+   * 曾经这里写成 `Core.applyTurn(state, move)`，导致状态被提前改动、
+   * 动画终点永远慢一步、求解播放出来的序列完全错乱。
+   */
   const preview = Core.cloneState(state);
   Core.applyTurn(preview, move);
   for (const m of moving) {
@@ -284,7 +292,32 @@ function perform(move, opts = {}) {
   const duration = opts.duration ?? (opts.fast ? 110 : 200);
   const t0 = performance.now();
 
+  /*
+   * 结算这一步：提交逻辑状态、更新界面、触发回调。
+   * finished 标记保证幂等——tick 的临界帧与 cancelPending 都可能在同一步调用它，
+   * 重复提交会把动作执行两遍（曾导致「求解播放后反而更乱」）。
+   */
+  let finished = false;
+  const settleAnim = () => {
+    if (finished) return;
+    finished = true;
+    anim = null;                       // 先清空，避免回调里重入
+    Core.applyTurn(state, move);
+    syncVisual();
+    if (!opts.silent) {
+      history.push(move);
+      if (!scrambling) {
+        moveCount++;
+        $('moves').textContent = String(moveCount);
+        startTimer();
+      }
+      refreshSolved();
+    }
+    if (opts.onDone) opts.onDone();
+  };
   anim = {
+    /** 供 cancelPending 使用：立刻结算这一步，保证逻辑与画面不脱节 */
+    finish: settleAnim,
     tick(now) {
       const p = duration <= 0 ? 1 : Math.min(1, (now - t0) / duration);
       const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;   // easeInOutQuad
@@ -293,20 +326,9 @@ function perform(move, opts = {}) {
         m.pc.group.quaternion.slerpQuaternions(m.quat, m.toQuat, e);
       }
       if (p >= 1) {
-        anim = null;
-        Core.applyTurn(state, move);
-        syncVisual();
-        if (!opts.silent) {
-          history.push(move);
-          if (!scrambling) {
-            moveCount++;
-            $('moves').textContent = String(moveCount);
-            startTimer();
-          }
-          refreshSolved();
-        }
-        if (opts.onDone) opts.onDone();
-        if (queue.length) { const n = queue.shift(); perform(n.move, n.opts); }
+        const hadQueue = queue.length > 0;
+        settleAnim();
+        if (hadQueue) { const n = queue.shift(); perform(n.move, n.opts); }
       }
     },
   };
@@ -355,10 +377,17 @@ function randomScramble(n = 25) {
  * 而正在进行的那一步动画结束后也不会再改逻辑状态。
  */
 let cancelToken = 0;
+/*
+ * 打断当前操作。
+ * ⚠️ 必须先把进行中的动画**结算到位**（提交逻辑状态并触发它的 onDone），
+ * 否则：逻辑状态会少一步、画面与状态脱节，而且 await performAsync 的 Promise
+ * 永远不会 resolve —— 表现为「自动播放卡死、求解后仍是乱的」。
+ */
 function cancelPending() {
   cancelToken++;
   queue.length = 0;
-  anim = null;                    // 丢弃当前动画：不再推进、不再落逻辑状态
+  if (anim && typeof anim.finish === 'function') anim.finish();
+  anim = null;
   scrambling = false;
 }
 
@@ -534,55 +563,53 @@ addEventListener('keydown', (ev) => {
 
 /* ============================== 求解器接入 ============================== */
 /*
- * 架构：Worker 只负责「构建 / 读取剪枝表」并把 ArrayBuffer 回传；
- * 求解在主线程调用同一份 cube-core（毫秒级，最坏约 2 秒），
- * 这样求解路径与 Node 测试完全一致，避免跨线程状态边界带来的隐性 bug。
+ * 求解器：cubejs（ldez/cubejs，MIT）——Kociemba 两阶段算法，成熟且自洽。
+ * 数据流：
+ *   内核状态 --Core.faceletString--> 官方 54 面片串 --Cube.fromString--> cube.solve() --> 动作序列
+ * 动作记号与内核完全一致，因此解序列可直接 applyMoves 回放（见 tools/verify-cubejs.js）。
+ *
+ * 为什么用第三方而不是自研：本项目自研两阶段在 E 层棱块朝向上存在坐标歧义，
+ * 且历史上转动方向与标准相反（已修复并加入回归断言）。改用成熟实现后，
+ * 「内核状态 → 面片串」成为唯一需要维护的适配层，其正确性由
+ * tools/verify-cubejs.js 用独立面片校验把关。
  */
-let worker = null;
-let solverReady = false;          // 表是否已加载进主线程
 const solverStateEl = $('solver-state');
 const toastEl = $('toast'), toastText = $('toast-text'), toastBar = $('toast-bar');
-let pendingSolve = null, solveSeq = 0;
+let solverReady = false;        // 剪枝表是否已就绪
+let solverInitStarted = false;
+let pendingSolve = null;
 
-/*
- * 本轮停用自动求解：两阶段搜索在本项目的坐标下还会留下可见错位（详见 STATUS.md），
- * 与其返回错解，不如明确停用。求解表构建 Worker 也就不再启动。
- * 手动玩法（打乱/转动/撤销/计时）完全不受影响。
- */
-const SOLVER_ENABLED = false;
-(function initWorker() {
-  if (!SOLVER_ENABLED) { solverStateEl.textContent = '本轮未启用'; return; }
-  try { worker = new Worker('solver-worker.js'); }
-  catch (e) { solverStateEl.textContent = '不可用'; return; }
-  worker.onmessage = (ev) => {
-    const m = ev.data || {};
-    if (m.type === 'progress') {
-      toastEl.classList.add('show');
-      toastText.textContent = `${m.label} … ${m.pct}%`;
-      toastBar.style.width = m.pct + '%';
-    } else if (m.type === 'tables') {
-      try {
-        Core.Solver.load({
-          p1: new Uint8Array(m.p1), sc: new Uint8Array(m.sc), se: new Uint8Array(m.se),
-        });
-        solverReady = true;
-        solverStateEl.textContent = m.cached ? '就绪（本地缓存）' : '就绪';
-        toastEl.classList.remove('show');
-        $('btn-hint').disabled = false;
-        $('btn-solve').disabled = false;
-        if (pendingSolve) { const cb = pendingSolve; pendingSolve = null; cb(); }
-      } catch (e) {
-        solverStateEl.textContent = '加载失败';
-        flashStatus('求解表加载失败：' + (e && e.message || e));
-      }
-    } else if (m.type === 'failed') {
-      solverStateEl.textContent = '不可用';
-      toastEl.classList.remove('show');
-      flashStatus('求解表构建失败：' + m.message);
-    }
-  };
-  worker.onerror = () => { solverStateEl.textContent = '不可用'; toastEl.classList.remove('show'); };
-  worker.postMessage({ type: 'init' });
+/** 初始化 cubejs 的剪枝表（约 1~2 秒，同步计算，故延后到空闲时执行） */
+function initSolverTables() {
+  if (solverReady) return;
+  if (typeof window.Cube === 'undefined') {
+    solverStateEl.textContent = '不可用';
+    flashStatus('求解器脚本未加载（vendor/cubejs/cubejs.browser.js）');
+    return;
+  }
+  solverStateEl.textContent = '初始化中…';
+  try {
+    window.Cube.initSolver();
+    solverReady = true;
+    solverStateEl.textContent = '就绪';
+    $('btn-hint').disabled = false;
+    $('btn-solve').disabled = false;
+    $('btn-hint').title = '给出完整解法（可直接播放）';
+    $('btn-solve').title = '自动求解并播放';
+    if (pendingSolve) { const cb = pendingSolve; pendingSolve = null; cb(); }
+  } catch (e) {
+    solverStateEl.textContent = '不可用';
+    flashStatus('求解器初始化失败：' + (e && e.message || e));
+  }
+}
+(function scheduleSolverInit() {
+  if (solverInitStarted) return;
+  solverInitStarted = true;
+  solverStateEl.textContent = '待初始化';
+  // 先让首屏渲染完，再做 1~2 秒的同步建表
+  const kick = () => { setTimeout(initSolverTables, 0); };
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(kick, { timeout: 1500 });
+  else setTimeout(kick, 200);
 })();
 
 function setSolving(on) {
@@ -591,13 +618,19 @@ function setSolving(on) {
   $('btn-hint').disabled = on || !solverReady;
 }
 
+/** 求当前状态的解；返回动作数组。同步执行，调用方负责先渲染。 */
+function solveCurrentState() {
+  const cube = window.Cube.fromString(Core.faceletString(state));
+  const text = cube.solve();
+  return String(text || '').trim().split(/\s+/).filter(Boolean);
+}
+
 /** 请求解算；表还没就绪时排队等待 */
 function requestSolve(cb) {
-  if (!SOLVER_ENABLED) { flashStatus('自动求解本轮未启用（测试阶段发现搜索仍会留下错位）'); return; }
   if (!solverReady) {
-    flashStatus('求解表还在准备中，就绪后会自动继续');
-    pendingSolve = () => requestSolve(cb);
-    return;
+    if (!solverInitStarted) scheduleSolverInit();
+    initSolverTables();                       // 立即补齐（此时用户已明确要用）
+    if (!solverReady) { flashStatus('求解器仍在初始化，请稍候再试'); return; }
   }
   if (anim || queue.length) { flashStatus('请等当前动画结束'); return; }
   setSolving(true);
@@ -606,12 +639,12 @@ function requestSolve(cb) {
   setTimeout(() => {
     let moves = null, err = null;
     const t0 = performance.now();
-    try {
-      moves = Core.Solver.solve({ perm: state.perm.slice(), ori: state.ori.map((m) => m.slice()) });
-    } catch (e) { err = e; }
+    try { moves = solveCurrentState(); }
+    catch (e) { err = e; }
     const ms = Math.round(performance.now() - t0);
     setSolving(false);
     if (err) { flashStatus('求解失败：' + (err.message || err)); return; }
+    if (!moves.length) { flashStatus('当前已经是还原态'); return; }
     cb(moves, ms);
   }, 50);
 }
@@ -693,7 +726,10 @@ addEventListener('resize', () => {
 });
 
 // 调试入口（方便在控制台里检查）
-window.__cube = { Core, state, pieces, perform, doScramble, resetCube, requestSolve };
+window.__cube = { Core, state, pieces, perform, doScramble, resetCube, requestSolve,
+  get moveCount() { return moveCount; },
+  // e2e 验证用：观察动画/队列状态（只读，不影响行为）
+  get debugState() { return { anim: !!anim, queue: queue.length, scrambling }; } };
 </script>
 </body>
 </html>

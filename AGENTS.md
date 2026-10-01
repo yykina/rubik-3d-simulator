@@ -2,15 +2,17 @@
 
 ## Project Structure & Module Organization
 
-- `src/cube-core.js` — 3×3×3 内核：几何、状态操作、坐标转换、Kociemba 两阶段求解器。
+- `src/cube-core.js` — 3×3×3 内核：几何、状态操作、朝向读取、官方面片编码。
   Node 下导出 CommonJS，浏览器下挂 `window.CubeCore`（UMD）。
-- `src/test-core.js` — 测试脚本：几何自检、编码/状态机一致性、求解器随机验证。
+  （自研剪枝表求解器已移除；求解由 cubejs 承担，内核只负责状态与面片编码。）
+- `src/test-core.js` — 测试脚本：几何自检、与 Kociemba 官方表的回归断言、编码/状态机一致性。
 - `src/SOLVER-NOTES.md` — **求解器设计与踩坑记录，改求解器前必读。**
-- `src/debug/` — 建表/加载/性能工具与历史诊断脚本；表缓存 `solver-tables.bin` 不纳入版本控制。
-- `web/` — 三维界面：`index.html`（渲染与交互）、`solver-worker.js`（建表并回传 ArrayBuffer）、
-  `solver-table-worker.js`（单表并行构建）、`cube-core.js`（内核副本，改内核后需同步）。
-- `tools/` — `serve.js`（静态服务器）、`verify-web.js`（Playwright 端到端验证）、
-  `seed-tables.js`（把表缓存注入 IndexedDB）、`verify-solver-core.js`（求解器正确性验证）。
+- `vendor/cubejs/` — 求解器 cubejs 1.3.2（ldez/cubejs，MIT）原始 CommonJS 源码。
+- `web/` — 三维界面：`index.html`（渲染与交互）、`cube-core.js`（内核副本，改内核后需同步）、
+  `vendor/cubejs/cubejs.browser.js`（由 `tools/build-cubejs-browser.js` 生成的浏览器包，挂 `window.Cube`）。
+- `tools/` — `serve.js`（静态服务器）、`verify-web.js`（Playwright 端到端验证，含真实求解）、
+  `verify-cubejs.js`（求解器校验：内核状态→求解→几何回放）、
+  `build-cubejs-browser.js`（生成 cubejs 浏览器包）。
 - `STATUS.md` 记录进度、约定与已知限制；`CHANGLOG.md` 记录变更历史。
 
 ## Build, Test, and Development Commands
@@ -18,15 +20,15 @@
 ```bash
 npm install                          # 仅测试需要（Playwright + Chromium）
 npm run serve                        # 静态服务器 http://127.0.0.1:5173
-npm test                             # 内核 + 求解器测试（有表缓存时很快）
-npm run tables                       # 重新生成剪枝表缓存（约 3 分钟，6.1 MB）
-node tools/verify-web.js             # 浏览器端到端验证（含截图，失败返回非零）
-SEED_TABLES=1 node tools/verify-web.js   # 注入表缓存，跳过首次构建
+npm test                             # 内核测试（含与 Kociemba 官方表比对的回归断言）
+npm run verify:solver                # 求解器校验（内核几何独立回放，要求 0 错位）
+npm run verify                       # 浏览器端到端验证（含真实求解 + 播放）
+npm run build:cubejs                 # 重新生成 cubejs 浏览器包（改 vendor/cubejs 后执行）
 node --check src/cube-core.js        # 语法检查
 ```
 
-首次在浏览器打开页面时会在后台并行构建求解表（约 1~2 分钟，期间界面可玩），
-构建完写入 IndexedDB，之后刷新秒级加载。表缓存文件缺失时可先跑 `npm run tables`。
+首次打开页面时求解器会在空闲时初始化（`Cube.initSolver()`，约 1.7 秒），
+期间界面完全可玩；就绪后「提示 / 自动求解」按钮自动启用。
 
 ## Coding Style & Naming Conventions
 
@@ -40,7 +42,12 @@ node --check src/cube-core.js        # 语法检查
 - `mul(a, b)` 实际算的是「先 a 再 b」的复合；`compose` 必须由 `mul` 生成，勿手写索引。
 - `isSolved()` 等于 `isSolvedByAppearance()`：只看**外观**。已穷举验证：只有 6 个面心块
   各自存在 3 种不可见的朝向冗余，角块与棱块（含 E 层 FR/FL/BL/BR）的任何朝向偏差都可见。
-- 任何影响坐标或编码的改动，都必须同步提升剪枝表缓存的版本号（`CBxx`）并重建。
+- **转动角度必须与 Kociemba 官方表一致**，`src/test-core.js` 的 [1b] 段逐项比对；
+  自洽性测试（逆动作互消等）无法发现「整体取逆」，不能替代它。
+- `Core.faceletString()` 是与外部求解器对接的**唯一通道**，改动后必须跑
+  `npm test`、`npm run verify:solver`、`npm run verify` 三项。
+- **逻辑状态只提交一次**：`perform()` 不要动 `state`；打断操作必须先结算进行中的动画，
+  否则 `await performAsync` 的 Promise 永不 resolve。
 
 ## Testing Guidelines
 
@@ -49,9 +56,8 @@ node --check src/cube-core.js        # 语法检查
 压缩状态机与几何状态机一致性、求解器输出经**独立面片校验**（`misplacedStickers`）确实还原。
 端到端验证放在 `tools/verify-web.js`，必须对关键行为断言并在失败时返回非零。
 
-求解器当前仍有限制（见 `STATUS.md`）：两阶段结果可能残留少量错位块，已用有界修复搜索兜底，
-且求解结果在返回前**必须**通过外观校验。若修改求解器，请同时运行
-`node tools/verify-solver-core.js`，它用独立面片校验而非 `isSolved()`。
+求解器已改用 cubejs（见 `STATUS.md` / `SOLVER-NOTES.md`）。任何求解相关改动都必须运行
+`npm run verify:solver`——它用**独立面片校验**（`misplacedStickers`）而非 `isSolved()` 判定。
 
 ## Commit & Pull Request Guidelines
 
